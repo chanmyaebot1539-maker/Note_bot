@@ -1,8 +1,9 @@
 services:
   - type: web
     name: note-bot
-    runtime: python
-    buildCommand: pip install -r requirements.txt
+    env: python
+    rootDir: .
+    buildCommand: bash build.sh
     startCommand: python main.py
     envVars:
       - key: BOT_TOKEN
