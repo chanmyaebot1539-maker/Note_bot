@@ -3,7 +3,7 @@ import re
 import logging
 from telegram import (
     Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton,
-    KeyboardButton, ReplyKeyboardRemove
+    KeyboardButton
 )
 from telegram.ext import (
     ContextTypes, ConversationHandler, CommandHandler,
@@ -16,13 +16,10 @@ logger = logging.getLogger(__name__)
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
 # Conversation states
-(
-    WAIT_CMD_NAME,
-    WAIT_MESSAGES,
-    WAIT_EDIT_MESSAGES,
-    ADMIN_USER_LIST,
-) = range(4)
+WAIT_CMD_NAME, WAIT_MESSAGES = range(2)
 
+
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
 
 def get_full_name(user):
     name = user.first_name or ""
@@ -32,7 +29,7 @@ def get_full_name(user):
 
 
 async def build_main_menu(user_id: int):
-    global_cmds = await db.get_all_global_commands()
+    global_cmds = await db.get_all_global_commands(OWNER_ID)
     rows = []
 
     top_row = [KeyboardButton("Create Command")]
@@ -44,7 +41,7 @@ async def build_main_menu(user_id: int):
 
     btn_names = [f"/{c['command_name']}" for c in global_cmds]
     for i in range(0, len(btn_names), 3):
-        rows.append(btn_names[i:i+3])
+        rows.append(btn_names[i:i + 3])
 
     if user_id != OWNER_ID:
         user_cmds = await db.get_user_commands(user_id)
@@ -58,8 +55,8 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
     user = update.effective_user
     markup = await build_main_menu(user.id)
     msg = text or (
-        "You can create custom commands that your bot can reply to with predefined messages. "
-        "Use the menu below to create new custom commands, change the look of the bot's menu or select a command to edit it."
+        "Use the menu below to create commands, view your custom commands, "
+        "or trigger any of the global commands shown."
     )
     try:
         await update.effective_message.reply_text(msg, reply_markup=markup)
@@ -67,77 +64,136 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         logger.error(f"send_main_menu error: {e}")
 
 
+# ─── SEND COMMAND REPLIES ──────────────────────────────────────────────────────
+
+async def _send_command_messages(bot, chat_id: int, messages: list):
+    for msg in messages:
+        try:
+            mtype = msg.get("type")
+            caption = msg.get("caption") or None
+            if mtype == "text":
+                await bot.send_message(chat_id, msg["content"])
+            elif mtype == "photo":
+                await bot.send_photo(chat_id, msg["content"], caption=caption)
+            elif mtype == "video":
+                await bot.send_video(chat_id, msg["content"], caption=caption)
+            elif mtype == "document":
+                await bot.send_document(chat_id, msg["content"], caption=caption)
+            elif mtype == "audio":
+                await bot.send_audio(chat_id, msg["content"], caption=caption)
+            elif mtype == "voice":
+                await bot.send_voice(chat_id, msg["content"])
+            elif mtype == "sticker":
+                await bot.send_sticker(chat_id, msg["content"])
+            elif mtype == "animation":
+                await bot.send_animation(chat_id, msg["content"], caption=caption)
+        except Exception as e:
+            logger.error(f"_send_command_messages error ({mtype}): {e}")
+
+
+# ─── START ────────────────────────────────────────────────────────────────────
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_main_menu(update, context, "Welcome! Use the menu below to get started.")
+    user = update.effective_user
+    await send_main_menu(
+        update, context,
+        f"Welcome{', ' + user.first_name if user.first_name else ''}! "
+        "Use the menu below to get started.\n\n"
+        f"Your Telegram ID: <code>{user.id}</code>",
+    )
+    # Edit: send_main_menu doesn't support parse_mode, send directly
+    markup = await build_main_menu(user.id)
+    try:
+        await update.message.reply_text(
+            f"Welcome! Your Telegram ID is <code>{user.id}</code>.\n"
+            "Use the menu below to get started.",
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(e)
 
 
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
+# ─── UNIFIED TEXT ROUTER ──────────────────────────────────────────────────────
+
+async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Single entry point for ALL text messages (both plain text and /commands)."""
+    message = update.message
+    if not message or not message.text:
+        return
+
+    text = message.text.strip()
     user = update.effective_user
 
+    # ── Check if we're in "add messages to existing command" mode ──
+    adding_cmd = context.user_data.get("adding_to_cmd")
+    adding_owner = context.user_data.get("adding_to_owner")
+    if adding_cmd and adding_owner:
+        await _handle_adding_messages(update, context, text, adding_cmd, adding_owner)
+        return
+
+    # ── Menu navigation ──
     if text == "Create Command":
         return await create_command_start(update, context)
-    elif text == "Admin Panel" and user.id == OWNER_ID:
-        return await admin_panel(update, context)
-    elif text == "Config. Main Menu":
+
+    if text == "Admin Panel":
+        if user.id == OWNER_ID:
+            return await admin_panel(update, context)
+        return
+
+    if text == "Config. Main Menu":
         return await config_main_menu(update, context)
-    elif text == "Custom Commands":
+
+    if text == "Custom Commands":
         return await show_user_commands(update, context)
-    elif text.startswith("/"):
-        cmd = text[1:].split("@")[0].lower()
-        return await trigger_command(update, context, cmd)
-    else:
-        await send_main_menu(update, context)
+
+    # ── Command trigger (keyboard buttons like /love OR typed /love) ──
+    if text.startswith("/"):
+        raw = text[1:].split("@")[0].strip().lower()
+        if raw:
+            return await trigger_command(update, context, raw)
+        return
+
+    # ── Fallback: show main menu ──
+    await send_main_menu(update, context)
 
 
 async def trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE, cmd_name: str = None):
     user = update.effective_user
-    if cmd_name is None:
-        cmd_name = update.message.text[1:].split("@")[0].lower()
+    message = update.message
 
-    doc = await db.get_global_command(cmd_name)
-    if not doc:
-        doc = await db.get_command(user.id, cmd_name)
-    if not doc:
+    if cmd_name is None:
+        raw = message.text.strip() if message.text else ""
+        cmd_name = raw.lstrip("/").split("@")[0].lower()
+
+    if not cmd_name:
         return
 
-    for msg in doc.get("messages", []):
-        try:
-            mtype = msg.get("type")
-            caption = msg.get("caption", "")
-            if mtype == "text":
-                await update.message.reply_text(msg["content"])
-            elif mtype == "photo":
-                await update.message.reply_photo(msg["content"], caption=caption or None)
-            elif mtype == "video":
-                await update.message.reply_video(msg["content"], caption=caption or None)
-            elif mtype == "document":
-                await update.message.reply_document(msg["content"], caption=caption or None)
-            elif mtype == "audio":
-                await update.message.reply_audio(msg["content"], caption=caption or None)
-            elif mtype == "voice":
-                await update.message.reply_voice(msg["content"], caption=caption or None)
-            elif mtype == "sticker":
-                await update.message.reply_sticker(msg["content"])
-            elif mtype == "animation":
-                await update.message.reply_animation(msg["content"], caption=caption or None)
-        except Exception as e:
-            logger.error(f"trigger_command send error: {e}")
+    # Look up global (owner) command first, then user's private command
+    doc = await db.get_global_command(OWNER_ID, cmd_name)
+    if not doc:
+        doc = await db.get_command(user.id, cmd_name)
+
+    if not doc:
+        logger.info(f"No command found: '{cmd_name}' for user {user.id} / owner {OWNER_ID}")
+        return
+
+    await _send_command_messages(context.bot, message.chat_id, doc.get("messages", []))
 
 
-# ─── CREATE COMMAND FLOW ─────────────────────────────────────────────────────
+# ─── CREATE COMMAND FLOW ───────────────────────────────────────────────────────
 
 async def create_command_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     cancel_kb = ReplyKeyboardMarkup([["Cancel"]], resize_keyboard=True)
     try:
         await update.effective_message.reply_text(
-            "Enter the command name. Please use only latin letters, numbers and '_'.\n\n"
+            "Enter the command name. Please use only Latin letters, numbers and '_'.\n\n"
             "Some examples:\n/website\n/pricelist\n/contacts\n/best_music\n/best_photos",
             reply_markup=cancel_kb
         )
     except Exception as e:
-        logger.error(f"create_command_start error: {e}")
+        logger.error(e)
     return WAIT_CMD_NAME
 
 
@@ -166,9 +222,9 @@ async def received_cmd_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         await update.message.reply_text(
-            f"Bot can reply with one or more messages to a custom command. "
-            f"You can use text, pictures, videos or any other file type.\n\n"
-            f"Send everything that you want to add as a reply to this command and press 'Save'.",
+            "Bot can reply with one or more messages to a custom command.\n"
+            "You can use text, pictures, videos or any other file type.\n\n"
+            "Send everything you want as a reply to this command, then press 'Save'.",
             reply_markup=save_kb
         )
     except Exception as e:
@@ -199,20 +255,21 @@ async def collect_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await db.create_command(user.id, creator_name, cmd_name, msgs)
-            await send_main_menu(
-                update, context,
-                f"Custom command /{cmd_name} was successfully created.\n\n"
-                "You can create custom commands that your bot can reply to with predefined messages. "
-                "Use the menu below to create new custom commands, change the look of the bot's menu or select a command to edit it."
-            )
         except Exception as e:
             logger.error(f"create_command db error: {e}")
             await send_main_menu(update, context, "Error saving command. Try again.")
+            return ConversationHandler.END
+
+        await send_main_menu(
+            update, context,
+            f"Custom command /{cmd_name} was successfully created.\n\n"
+            "Use the menu below to create more commands or trigger existing ones."
+        )
         return ConversationHandler.END
 
     if text in ("Add Question", "Enable Random-message Mode"):
         try:
-            await message.reply_text(f"Feature noted. Continue sending messages or press Save.")
+            await message.reply_text("Feature noted. Continue sending messages or press 'Save'.")
         except Exception as e:
             logger.error(e)
         return WAIT_MESSAGES
@@ -220,11 +277,18 @@ async def collect_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_data = _extract_message_data(message)
     if msg_data:
         context.user_data["messages"].append(msg_data)
+        count = len(context.user_data["messages"])
         try:
-            await message.reply_text(f"Message added ({len(context.user_data['messages'])} total). Send more or press 'Save'.")
+            await message.reply_text(f"Message added ({count} total). Send more or press 'Save'.")
         except Exception as e:
             logger.error(e)
     return WAIT_MESSAGES
+
+
+async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await send_main_menu(update, context, "Cancelled.")
+    return ConversationHandler.END
 
 
 def _extract_message_data(message):
@@ -247,13 +311,47 @@ def _extract_message_data(message):
     return None
 
 
-async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await send_main_menu(update, context, "Cancelled.")
-    return ConversationHandler.END
+# ─── ADD MESSAGES TO EXISTING COMMAND ─────────────────────────────────────────
+
+async def _handle_adding_messages(update, context, text, cmd_name, owner_id):
+    message = update.message
+
+    if text == "Cancel":
+        context.user_data.pop("adding_to_cmd", None)
+        context.user_data.pop("adding_to_owner", None)
+        context.user_data.pop("new_msgs_buffer", None)
+        await send_main_menu(update, context, "Cancelled.")
+        return
+
+    if text == "Save":
+        new_msgs = context.user_data.pop("new_msgs_buffer", [])
+        doc = await db.get_command(owner_id, cmd_name)
+        existing = doc.get("messages", []) if doc else []
+        await db.update_command_messages(owner_id, cmd_name, existing + new_msgs)
+        context.user_data.pop("adding_to_cmd", None)
+        context.user_data.pop("adding_to_owner", None)
+        await send_main_menu(update, context, f"Command /{cmd_name} was successfully updated.")
+        return
+
+    if text in ("Add Question", "Enable Random-message Mode"):
+        try:
+            await message.reply_text("Feature noted. Continue sending messages or press 'Save'.")
+        except Exception as e:
+            logger.error(e)
+        return
+
+    msg_data = _extract_message_data(message)
+    if msg_data:
+        buf = context.user_data.get("new_msgs_buffer", [])
+        buf.append(msg_data)
+        context.user_data["new_msgs_buffer"] = buf
+        try:
+            await message.reply_text(f"Message added ({len(buf)} new). Send more or press 'Save'.")
+        except Exception as e:
+            logger.error(e)
 
 
-# ─── USER CUSTOM COMMANDS ────────────────────────────────────────────────────
+# ─── USER CUSTOM COMMANDS ──────────────────────────────────────────────────────
 
 async def show_user_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -262,7 +360,10 @@ async def show_user_commands(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_main_menu(update, context, "You have no custom commands yet.")
         return
 
-    buttons = [[InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"mycmd_{c['command_name']}")] for c in cmds]
+    buttons = [
+        [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"mycmd_{c['command_name']}")]
+        for c in cmds
+    ]
     buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
     try:
         await update.message.reply_text(
@@ -293,16 +394,17 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data.startswith("mycmd_"):
         cmd_name = data[len("mycmd_"):]
-        context.user_data["viewing_cmd"] = cmd_name
         buttons = [
             [InlineKeyboardButton("View Command", callback_data=f"viewcmd_{cmd_name}")],
             [InlineKeyboardButton("Edit Messages", callback_data=f"editcmd_{cmd_name}")],
             [InlineKeyboardButton("Configure Menu", callback_data=f"cfgmenu_{cmd_name}")],
             [InlineKeyboardButton("Delete Command", callback_data=f"delcmd_{cmd_name}")],
+            [InlineKeyboardButton("Back", callback_data="back_main")],
         ]
         try:
             await query.edit_message_text(
-                f"Custom command /{cmd_name}.\n\nHere you can look at the result of a command, delete it or add it to your bot's menu.",
+                f"Custom command /{cmd_name}.\n\n"
+                "Here you can view, edit, or delete this command.",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
         except Exception as e:
@@ -312,41 +414,29 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         cmd_name = data[len("viewcmd_"):]
         doc = await db.get_command(user.id, cmd_name)
         if not doc:
-            doc = await db.get_global_command(cmd_name)
+            doc = await db.get_global_command(OWNER_ID, cmd_name)
         if doc:
-            for msg in doc.get("messages", []):
-                try:
-                    mtype = msg.get("type")
-                    if mtype == "text":
-                        await context.bot.send_message(user.id, msg["content"])
-                    elif mtype == "photo":
-                        await context.bot.send_photo(user.id, msg["content"], caption=msg.get("caption") or None)
-                    elif mtype == "video":
-                        await context.bot.send_video(user.id, msg["content"], caption=msg.get("caption") or None)
-                    elif mtype == "document":
-                        await context.bot.send_document(user.id, msg["content"], caption=msg.get("caption") or None)
-                except Exception as e:
-                    logger.error(e)
+            await _send_command_messages(context.bot, user.id, doc.get("messages", []))
+        else:
+            await query.answer("Command not found.", show_alert=True)
 
     elif data.startswith("editcmd_"):
         cmd_name = data[len("editcmd_"):]
         doc = await db.get_command(user.id, cmd_name)
         if not doc and user.id == OWNER_ID:
-            doc = await db.get_global_command(cmd_name)
+            doc = await db.get_global_command(OWNER_ID, cmd_name)
         if not doc:
             await query.answer("Command not found.", show_alert=True)
             return
 
-        context.user_data["editing_cmd"] = cmd_name
-        context.user_data["editing_owner"] = (user.id == OWNER_ID and not await db.get_command(user.id, cmd_name))
         msgs = doc.get("messages", [])
-        text_lines = []
+        lines = []
         buttons = []
         for i, m in enumerate(msgs):
             preview = m.get("content", "")[:60] if m.get("type") == "text" else f"[{m.get('type')}]"
-            text_lines.append(preview)
+            lines.append(f"{i+1}. {preview}")
             buttons.append([InlineKeyboardButton(
-                f"🗑 Press to delete this message: /{cmd_name}_delete{i}",
+                f"🗑 Delete message {i+1}",
                 callback_data=f"delmsg_{cmd_name}_{i}"
             )])
         buttons += [
@@ -354,9 +444,9 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             [InlineKeyboardButton("Delete All Messages", callback_data=f"delmsgall_{cmd_name}")],
             [InlineKeyboardButton("Go Back", callback_data=f"mycmd_{cmd_name}")],
         ]
-        text = "\n".join(text_lines) if text_lines else "No messages."
+        body = "\n".join(lines) if lines else "No messages yet."
         try:
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+            await query.edit_message_text(body, reply_markup=InlineKeyboardMarkup(buttons))
         except Exception as e:
             logger.error(e)
 
@@ -365,35 +455,32 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         cmd_name = parts[1]
         idx = int(parts[2])
         doc = await db.get_command(user.id, cmd_name)
-        if not doc and user.id == OWNER_ID:
-            doc = await db.get_global_command(cmd_name)
         if doc:
             msgs = doc.get("messages", [])
             if 0 <= idx < len(msgs):
                 msgs.pop(idx)
-                target_id = user.id
-                await db.update_command_messages(target_id, cmd_name, msgs)
+                await db.update_command_messages(user.id, cmd_name, msgs)
                 await query.answer("Message deleted.")
+                # Refresh edit view
+                fake_data = f"editcmd_{cmd_name}"
+                query.data = fake_data
                 await cmd_detail_callback(update, context)
 
     elif data.startswith("delmsgall_"):
         cmd_name = data[len("delmsgall_"):]
         await db.update_command_messages(user.id, cmd_name, [])
         await query.answer("All messages deleted.")
-        context.user_data["viewing_cmd"] = cmd_name
+        query.data = f"editcmd_{cmd_name}"
         await cmd_detail_callback(update, context)
 
     elif data.startswith("addmsg_"):
         cmd_name = data[len("addmsg_"):]
         context.user_data["adding_to_cmd"] = cmd_name
         context.user_data["adding_to_owner"] = user.id
-        save_kb = ReplyKeyboardMarkup(
-            [["Save"], ["Cancel"]],
-            resize_keyboard=True
-        )
+        save_kb = ReplyKeyboardMarkup([["Save"], ["Cancel"]], resize_keyboard=True)
         try:
             await query.message.reply_text(
-                "Send everything that you want to add as a reply to this command and press 'Save'.",
+                "Send everything that you want to add as a reply to this command, then press 'Save'.",
                 reply_markup=save_kb
             )
         except Exception as e:
@@ -402,12 +489,12 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data.startswith("cfgmenu_"):
         cmd_name = data[len("cfgmenu_"):]
         buttons = [
-            [InlineKeyboardButton("Add Menu Item +", callback_data=f"addmenuitem_{cmd_name}")],
+            [InlineKeyboardButton("+ Add Menu Item +", callback_data=f"addmenuitem_{cmd_name}")],
             [InlineKeyboardButton("Go Back", callback_data=f"mycmd_{cmd_name}")],
         ]
         try:
             await query.edit_message_text(
-                "You can customize the user menu layout. Select an element to move, rename or delete it.",
+                "Customize your menu layout. Add items from your commands.",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
         except Exception as e:
@@ -416,24 +503,27 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data.startswith("addmenuitem_"):
         cmd_name = data[len("addmenuitem_"):]
         cmds = await db.get_user_commands(user.id)
-        btns = [[InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"menuadd_{cmd_name}_{c['command_name']}")] for c in cmds]
+        btns = [
+            [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"menuadd_{c['command_name']}")]
+            for c in cmds
+        ]
         btns.append([InlineKeyboardButton("Go Back", callback_data=f"cfgmenu_{cmd_name}")])
         try:
             await query.edit_message_text(
-                "Choose any available command to add it to the menu.",
+                "Choose a command to add to the menu:",
                 reply_markup=InlineKeyboardMarkup(btns)
             )
         except Exception as e:
             logger.error(e)
 
     elif data.startswith("menuadd_"):
-        await query.answer("Menu item added (feature: persistent menu config).")
+        await query.answer("Menu item noted.", show_alert=False)
 
     elif data.startswith("delcmd_"):
         cmd_name = data[len("delcmd_"):]
         buttons = [
             [InlineKeyboardButton("Yes, Delete", callback_data=f"confirmdelcmd_{cmd_name}")],
-            [InlineKeyboardButton("No, Go Back", callback_data=f"mycmd_{cmd_name}")],
+            [InlineKeyboardButton("Cancel", callback_data=f"mycmd_{cmd_name}")],
         ]
         try:
             await query.edit_message_text(
@@ -446,7 +536,6 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data.startswith("confirmdelcmd_"):
         cmd_name = data[len("confirmdelcmd_"):]
         await db.delete_command(user.id, cmd_name)
-        await query.answer(f"/{cmd_name} deleted.")
         markup = await build_main_menu(user.id)
         try:
             await query.edit_message_text(f"Command /{cmd_name} has been deleted.")
@@ -458,81 +547,51 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error(e)
 
 
-# ─── ADD MESSAGES (edit flow) ─────────────────────────────────────────────────
-
-async def adding_messages_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    text = message.text.strip() if message.text else None
-
-    cmd_name = context.user_data.get("adding_to_cmd")
-    owner_id = context.user_data.get("adding_to_owner")
-    if not cmd_name or not owner_id:
-        return
-
-    if text == "Cancel":
-        context.user_data.pop("adding_to_cmd", None)
-        context.user_data.pop("adding_to_owner", None)
-        await send_main_menu(update, context, "Cancelled.")
-        return
-
-    if text == "Save":
-        new_msgs = context.user_data.pop("new_msgs_buffer", [])
-        doc = await db.get_command(owner_id, cmd_name)
-        existing = doc.get("messages", []) if doc else []
-        await db.update_command_messages(owner_id, cmd_name, existing + new_msgs)
-        context.user_data.pop("adding_to_cmd", None)
-        context.user_data.pop("adding_to_owner", None)
-        await send_main_menu(update, context, f"Custom command /{cmd_name} was successfully updated.")
-        return
-
-    msg_data = _extract_message_data(message)
-    if msg_data:
-        buf = context.user_data.get("new_msgs_buffer", [])
-        buf.append(msg_data)
-        context.user_data["new_msgs_buffer"] = buf
-        try:
-            await message.reply_text(f"Message added ({len(buf)} new). Send more or press 'Save'.")
-        except Exception as e:
-            logger.error(e)
-
-
-# ─── CONFIG MAIN MENU ────────────────────────────────────────────────────────
+# ─── CONFIG MAIN MENU ──────────────────────────────────────────────────────────
 
 async def config_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     cmds = await db.get_user_commands(user.id)
-    buttons = [[InlineKeyboardButton(f"+ Add Menu Item +", callback_data="cfgmenu_root")]]
+    buttons = [[InlineKeyboardButton("+ Add Menu Item +", callback_data="cfgmenu_root")]]
     for c in cmds:
         buttons.append([InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"cfgitem_{c['command_name']}")])
     buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
     try:
         await update.message.reply_text(
-            "You can customize the user menu layout. Select an element to move, rename or delete it.",
+            "Customize your menu layout. Select a command to configure it.",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     except Exception as e:
         logger.error(e)
 
 
-# ─── ADMIN PANEL ─────────────────────────────────────────────────────────────
+# ─── ADMIN PANEL ──────────────────────────────────────────────────────────────
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
 
-    users = await db.get_all_users_with_commands()
+    users = await db.get_all_users_with_commands(OWNER_ID)
     if not users:
-        await send_main_menu(update, context, "No users have created commands yet.")
+        await send_main_menu(
+            update, context,
+            "Admin Panel\n\nNo other users have created commands yet.\n\n"
+            "When regular users create commands, they will appear here so you can review or delete them."
+        )
         return
 
     buttons = [
-        [InlineKeyboardButton(f"{u['creator_name']} ({u['count']} cmds)", callback_data=f"adminuser_{u['_id']}")]
+        [InlineKeyboardButton(
+            f"{u['creator_name']} ({u['count']} cmd{'s' if u['count'] != 1 else ''})",
+            callback_data=f"adminuser_{u['_id']}"
+        )]
         for u in users
     ]
     buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
     try:
         await update.message.reply_text(
-            "Admin Panel — Users with custom commands:",
+            "Admin Panel — Users with custom commands:\n"
+            "Tap a user to see and manage their commands.",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     except Exception as e:
@@ -552,7 +611,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(data[len("adminuser_"):])
         cmds = await db.get_user_commands(target_id)
         if not cmds:
-            await query.answer("No commands found.", show_alert=True)
+            await query.answer("No commands found for this user.", show_alert=True)
             return
         buttons = [
             [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"admincmd_{target_id}_{c['command_name']}")]
@@ -572,7 +631,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(parts[1])
         cmd_name = parts[2]
         buttons = [
-            [InlineKeyboardButton("Delete Command", callback_data=f"admindelcmd_{target_id}_{cmd_name}")],
+            [InlineKeyboardButton("🗑 Delete This Command", callback_data=f"admindelcmd_{target_id}_{cmd_name}")],
             [InlineKeyboardButton("Go Back", callback_data=f"adminuser_{target_id}")],
         ]
         try:
@@ -591,22 +650,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer(f"/{cmd_name} deleted.", show_alert=True)
         cmds = await db.get_user_commands(target_id)
         if not cmds:
-            users = await db.get_all_users_with_commands()
-            if not users:
-                try:
-                    await query.edit_message_text("No more user commands.")
-                except Exception:
-                    pass
-                return
-            buttons = [
-                [InlineKeyboardButton(f"{u['creator_name']} ({u['count']} cmds)", callback_data=f"adminuser_{u['_id']}")]
-                for u in users
-            ]
-            buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
-            try:
-                await query.edit_message_text("Admin Panel:", reply_markup=InlineKeyboardMarkup(buttons))
-            except Exception as e:
-                logger.error(e)
+            await admin_back_view(query)
         else:
             buttons = [
                 [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"admincmd_{target_id}_{c['command_name']}")]
@@ -615,39 +659,53 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             buttons.append([InlineKeyboardButton("Go Back", callback_data="admin_back")])
             try:
                 await query.edit_message_text(
-                    f"Remaining commands by user {target_id}:",
+                    f"Commands by user {target_id}:",
                     reply_markup=InlineKeyboardMarkup(buttons)
                 )
             except Exception as e:
                 logger.error(e)
 
     elif data == "admin_back":
-        users = await db.get_all_users_with_commands()
-        buttons = [
-            [InlineKeyboardButton(f"{u['creator_name']} ({u['count']} cmds)", callback_data=f"adminuser_{u['_id']}")]
-            for u in users
-        ]
-        buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
+        await admin_back_view(query)
+
+
+async def admin_back_view(query):
+    users = await db.get_all_users_with_commands(OWNER_ID)
+    if not users:
         try:
-            await query.edit_message_text("Admin Panel:", reply_markup=InlineKeyboardMarkup(buttons))
-        except Exception as e:
-            logger.error(e)
+            await query.edit_message_text("Admin Panel — No user commands found.")
+        except Exception:
+            pass
+        return
+    buttons = [
+        [InlineKeyboardButton(
+            f"{u['creator_name']} ({u['count']} cmd{'s' if u['count'] != 1 else ''})",
+            callback_data=f"adminuser_{u['_id']}"
+        )]
+        for u in users
+    ]
+    buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
+    try:
+        await query.edit_message_text(
+            "Admin Panel — Users with custom commands:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    except Exception as e:
+        logger.error(e)
 
 
-# ─── COMBINED CALLBACK ROUTER ─────────────────────────────────────────────────
+# ─── COMBINED CALLBACK ROUTER ──────────────────────────────────────────────────
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
-    user = query.from_user
-
     admin_prefixes = ("adminuser_", "admincmd_", "admindelcmd_", "admin_back")
     if any(data.startswith(p) for p in admin_prefixes):
         return await admin_callback(update, context)
     return await cmd_detail_callback(update, context)
 
 
-# ─── HANDLERS REGISTRATION ────────────────────────────────────────────────────
+# ─── HANDLER REGISTRATION ─────────────────────────────────────────────────────
 
 def build_handlers():
     create_conv = ConversationHandler(
@@ -656,8 +714,12 @@ def build_handlers():
             CommandHandler("createcommand", create_command_start),
         ],
         states={
-            WAIT_CMD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_cmd_name)],
-            WAIT_MESSAGES: [MessageHandler(~filters.COMMAND, collect_messages)],
+            WAIT_CMD_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, received_cmd_name)
+            ],
+            WAIT_MESSAGES: [
+                MessageHandler(~filters.COMMAND, collect_messages)
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel_conv),
@@ -669,12 +731,13 @@ def build_handlers():
     return [
         CommandHandler("start", start),
         create_conv,
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND & ~filters.Regex("^(Save|Cancel|Add Question|Enable Random-message Mode)$"),
-            adding_messages_handler,
-            block=False
-        ),
         CallbackQueryHandler(callback_router),
-        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
-        MessageHandler(filters.COMMAND, trigger_command),
+        # Single unified router handles ALL text including /commands from keyboard
+        MessageHandler(filters.TEXT, route_message),
+        # Also handle non-text media (photos/videos/docs) for the "add messages" flow
+        MessageHandler(
+            filters.PHOTO | filters.VIDEO | filters.Document.ALL |
+            filters.AUDIO | filters.VOICE | filters.Sticker.ALL | filters.ANIMATION,
+            route_message
+        ),
     ]
