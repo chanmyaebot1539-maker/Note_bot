@@ -1,10 +1,9 @@
 import os
 import asyncio
 import logging
-import threading
-from quart import Quart
+from aiohttp import web
 from telegram import Update
-from telegram.ext import Application, ApplicationBuilder
+from telegram.ext import ApplicationBuilder
 import database as db
 from handlers import build_handlers
 
@@ -17,16 +16,20 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 PORT = int(os.environ.get("PORT", 8080))
 
-app = Quart(__name__)
+
+async def health(request):
+    return web.Response(text="OK")
 
 
-@app.route("/")
-async def health():
-    return "OK", 200
-
-
-async def run_web():
-    await app.run_task(host="0.0.0.0", port=PORT)
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logger.info(f"Health-check server running on port {PORT}")
+    return runner
 
 
 async def error_handler(update: object, context):
@@ -54,7 +57,7 @@ async def main():
     for handler in build_handlers():
         application.add_handler(handler)
 
-    web_task = asyncio.create_task(run_web())
+    web_runner = await start_web_server()
 
     await application.initialize()
     await application.start()
@@ -66,13 +69,14 @@ async def main():
     logger.info("Bot is running...")
 
     try:
-        await web_task
-    except asyncio.CancelledError:
+        await asyncio.Event().wait()
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         await application.updater.stop()
         await application.stop()
         await application.shutdown()
+        await web_runner.cleanup()
 
 
 if __name__ == "__main__":
