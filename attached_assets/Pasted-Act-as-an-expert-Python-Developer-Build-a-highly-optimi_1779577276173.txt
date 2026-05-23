@@ -1,0 +1,56 @@
+Act as an expert Python Developer. Build a highly optimized, production-ready Telegram Bot using the 'python-telegram-bot' library (v20+) and 'motor' (async MongoDB driver) for efficient async I/O database operations. The bot will run on Python 3, using Render Web Service with UptimeRobot (Always-On) via a lightweight Quart/Flask web server, and needs to be completely crash-proof with robust global error handling.
+
+### ENVIRONMENT VARIABLES (Render Config)
+The bot must strictly fetch these from the environment:
+- BOT_TOKEN
+- OWNER_ID (Integer)
+- MONGODB_URI
+
+### DATABASE DESIGN (MongoDB Optimization)
+Create a single database with a 'commands' collection. To optimize storage and queries, use this lightweight document structure:
+{
+  "_id": ObjectId,
+  "creator_id": 12345678,        // Telegram User ID (or OWNER_ID)
+  "creator_name": "John Doe",    // Full Name or Username of the creator
+  "command_name": "love",        // Stored without leading slash
+  "messages": [                  // Array of message contents for multiple replies
+    {"type": "text", "content": "Believe in yourself..."},
+    {"type": "photo", "content": "file_id_here", "caption": "Optional"}
+  ]
+}
+Create a compound index on `creator_id` and `command_name` to optimize lookup speeds.
+
+### FUNCTIONAL ARCHITECTURE & FLOW
+
+1. PUBLIC & OWNER COMMANDS:
+- Commands created by the OWNER_ID are "Global" and can be viewed/triggered via Keyboard/Inline Buttons by all users.
+- Commands created by regular users are "Private" and only visible/accessible to that specific creator_id.
+
+2. MAIN MENU LAYOUT:
+- Show a persistent custom keyboard markup.
+- For all users: Display "Create Your Own Command" button alongside active Global Commands.
+- If a regular user has custom commands, display them inside a separate dynamically loaded inline section/keyboard.
+
+3. COMMAND CREATION WORKFLOW (State Machine / ConversationHandler):
+- Triggered by clicking "Create Your Own Command" or typing `/createcommand`.
+- Step 1: Ask for Command Name (Validate: only Latin letters, numbers, and underscores).
+- Step 2: Ask for Reply Content (Support Text, Photos, Videos, Documents). Allow adding multiple messages via an "Add Messages to Command" routine or click "Save" to finish.
+- Save the session to MongoDB under the user's explicit `creator_id` and `creator_name`.
+
+4. BOT OWNER CONTROL PANEL:
+- Accessible ONLY if user_id == OWNER_ID.
+- Show an "Admin Panel" button in the menu. Inside, display a list of Users who have created commands, formatted as buttons: `[User Name/Username]`
+- Clicking a user's name displays all custom commands created by that specific user.
+- Provide a "Delete Command" feature under each listed user command so the Owner can moderate and remove inappropriate content instantly.
+
+5. WEB SERVER FOR RENDER (Always On):
+- Integrate a simple Quart or Flask background web server running on port 8080.
+- Implement a `GET /` health-check route that replies "OK" to allow UptimeRobot to ping it successfully and prevent Render from sleeping.
+
+### ARCHITECTURAL RULES
+- Use Async/Await across all handlers and DB transactions.
+- Wrap all message-sending blocks in try-except statements to gracefully catch Telegram API errors (e.g., unauthorized, chat blocked) without crashing the bot core.
+- Structure the project cleanly: `main.py` (entry point & server), `database.py` (MongoDB manager), `handlers.py` (Telegram bot logic), and `requirements.txt`.
+
+### GIT COMPLIANCE Instruction for Agent:
+Write the complete script perfectly. Once testing confirms it operates flawlessly without weights or lags, automatically execute a Git push to the connected repository using the environment's provided configuration.
