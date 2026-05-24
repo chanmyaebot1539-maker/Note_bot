@@ -41,6 +41,10 @@ async def build_main_menu(user_id: int):
         top_row.append(KeyboardButton("Config. Main Menu"))
     rows.append(top_row)
 
+    # Owner gets a second row to manage their own global commands
+    if user_id == OWNER_ID:
+        rows.append([KeyboardButton("My Commands")])
+
     # Global (owner) commands with 👑 badge
     global_btn_names = [f"{OWNER_BADGE}/{c['command_name']}" for c in global_cmds]
     for i in range(0, len(global_btn_names), 3):
@@ -151,6 +155,10 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "Custom Commands":
         return await show_user_commands(update, context)
+
+    if text == "My Commands":
+        if user.id == OWNER_ID:
+            return await show_user_commands(update, context)
 
     # ── Command trigger — keyboard buttons send "👑 /cmd" or "/cmd" ──
     # Strip the owner badge if present, then extract the command name
