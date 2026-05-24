@@ -8,17 +8,20 @@ MONGODB_URI = os.environ.get("MONGODB_URI", "")
 client: AsyncIOMotorClient = None
 db = None
 commands_col = None
+user_menus_col = None
 
 
 async def init_db():
-    global client, db, commands_col
+    global client, db, commands_col, user_menus_col
     client = AsyncIOMotorClient(MONGODB_URI)
     db = client["notebot"]
     commands_col = db["commands"]
+    user_menus_col = db["user_menus"]
     await commands_col.create_index(
         [("creator_id", ASCENDING), ("command_name", ASCENDING)],
         unique=True
     )
+    await user_menus_col.create_index("user_id", unique=True)
 
 
 async def get_command(creator_id: int, command_name: str):
@@ -80,3 +83,34 @@ async def get_all_users_with_commands(owner_id: int):
     ]
     cursor = commands_col.aggregate(pipeline)
     return await cursor.to_list(length=None)
+
+
+# ─── USER MENU CONFIG ──────────────────────────────────────────────────────────
+
+async def get_user_menu_items(user_id: int) -> list:
+    """Returns the list of command names the user has pinned to their menu."""
+    doc = await user_menus_col.find_one({"user_id": user_id})
+    return doc.get("items", []) if doc else []
+
+
+async def add_to_user_menu(user_id: int, command_name: str):
+    await user_menus_col.update_one(
+        {"user_id": user_id},
+        {"$addToSet": {"items": command_name}},
+        upsert=True
+    )
+
+
+async def remove_from_user_menu(user_id: int, command_name: str):
+    await user_menus_col.update_one(
+        {"user_id": user_id},
+        {"$pull": {"items": command_name}}
+    )
+
+
+async def clear_user_menu(user_id: int):
+    await user_menus_col.update_one(
+        {"user_id": user_id},
+        {"$set": {"items": []}},
+        upsert=True
+    )

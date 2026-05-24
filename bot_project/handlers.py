@@ -15,8 +15,9 @@ logger = logging.getLogger(__name__)
 
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
-# Conversation states
 WAIT_CMD_NAME, WAIT_MESSAGES = range(2)
+
+OWNER_BADGE = "👑 "
 
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -32,6 +33,7 @@ async def build_main_menu(user_id: int):
     global_cmds = await db.get_all_global_commands(OWNER_ID)
     rows = []
 
+    # Top row — owner sees Admin Panel, regular users see Config. Main Menu
     top_row = [KeyboardButton("Create Command")]
     if user_id == OWNER_ID:
         top_row.append(KeyboardButton("Admin Panel"))
@@ -39,11 +41,19 @@ async def build_main_menu(user_id: int):
         top_row.append(KeyboardButton("Config. Main Menu"))
     rows.append(top_row)
 
-    btn_names = [f"/{c['command_name']}" for c in global_cmds]
-    for i in range(0, len(btn_names), 3):
-        rows.append(btn_names[i:i + 3])
+    # Global (owner) commands with 👑 badge
+    global_btn_names = [f"{OWNER_BADGE}/{c['command_name']}" for c in global_cmds]
+    for i in range(0, len(global_btn_names), 3):
+        rows.append(global_btn_names[i:i + 3])
 
+    # For regular users: also show their pinned personal commands
     if user_id != OWNER_ID:
+        pinned = await db.get_user_menu_items(user_id)
+        if pinned:
+            pinned_btns = [f"/{p}" for p in pinned]
+            for i in range(0, len(pinned_btns), 3):
+                rows.append(pinned_btns[i:i + 3])
+
         user_cmds = await db.get_user_commands(user_id)
         if user_cmds:
             rows.append(["Custom Commands"])
@@ -54,10 +64,7 @@ async def build_main_menu(user_id: int):
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = None):
     user = update.effective_user
     markup = await build_main_menu(user.id)
-    msg = text or (
-        "Use the menu below to create commands, view your custom commands, "
-        "or trigger any of the global commands shown."
-    )
+    msg = text or "Use the menu below to manage and trigger commands."
     try:
         await update.effective_message.reply_text(msg, reply_markup=markup)
     except Exception as e:
@@ -95,17 +102,11 @@ async def _send_command_messages(bot, chat_id: int, messages: list):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    await send_main_menu(
-        update, context,
-        f"Welcome{', ' + user.first_name if user.first_name else ''}! "
-        "Use the menu below to get started.\n\n"
-        f"Your Telegram ID: <code>{user.id}</code>",
-    )
-    # Edit: send_main_menu doesn't support parse_mode, send directly
     markup = await build_main_menu(user.id)
     try:
         await update.message.reply_text(
-            f"Welcome! Your Telegram ID is <code>{user.id}</code>.\n"
+            f"Welcome, {user.first_name or 'there'}!\n"
+            f"Your Telegram ID: <code>{user.id}</code>\n\n"
             "Use the menu below to get started.",
             reply_markup=markup,
             parse_mode="HTML"
@@ -117,19 +118,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── UNIFIED TEXT ROUTER ──────────────────────────────────────────────────────
 
 async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Single entry point for ALL text messages (both plain text and /commands)."""
     message = update.message
-    if not message or not message.text:
+    if not message:
         return
 
-    text = message.text.strip()
+    text = message.text.strip() if message.text else None
     user = update.effective_user
 
-    # ── Check if we're in "add messages to existing command" mode ──
+    # ── "Add messages to existing command" mode ──
     adding_cmd = context.user_data.get("adding_to_cmd")
     adding_owner = context.user_data.get("adding_to_owner")
     if adding_cmd and adding_owner:
         await _handle_adding_messages(update, context, text, adding_cmd, adding_owner)
+        return
+
+    if not text:
         return
 
     # ── Menu navigation ──
@@ -142,19 +145,22 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "Config. Main Menu":
-        return await config_main_menu(update, context)
+        if user.id != OWNER_ID:
+            return await config_main_menu(update, context)
+        return
 
     if text == "Custom Commands":
         return await show_user_commands(update, context)
 
-    # ── Command trigger (keyboard buttons like /love OR typed /love) ──
-    if text.startswith("/"):
-        raw = text[1:].split("@")[0].strip().lower()
+    # ── Command trigger — keyboard buttons send "👑 /cmd" or "/cmd" ──
+    # Strip the owner badge if present, then extract the command name
+    clean = text.replace(OWNER_BADGE, "").strip()
+    if clean.startswith("/"):
+        raw = clean[1:].split("@")[0].strip().lower()
         if raw:
             return await trigger_command(update, context, raw)
         return
 
-    # ── Fallback: show main menu ──
     await send_main_menu(update, context)
 
 
@@ -163,13 +169,12 @@ async def trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE, cm
     message = update.message
 
     if cmd_name is None:
-        raw = message.text.strip() if message.text else ""
+        raw = (message.text or "").strip().replace(OWNER_BADGE, "")
         cmd_name = raw.lstrip("/").split("@")[0].lower()
 
     if not cmd_name:
         return
 
-    # Look up global (owner) command first, then user's private command
     doc = await db.get_global_command(OWNER_ID, cmd_name)
     if not doc:
         doc = await db.get_command(user.id, cmd_name)
@@ -222,7 +227,7 @@ async def received_cmd_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         await update.message.reply_text(
-            "Bot can reply with one or more messages to a custom command.\n"
+            "Bot can reply with one or more messages to this command.\n"
             "You can use text, pictures, videos or any other file type.\n\n"
             "Send everything you want as a reply to this command, then press 'Save'.",
             reply_markup=save_kb
@@ -251,10 +256,8 @@ async def collect_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user = update.effective_user
         cmd_name = context.user_data["cmd_name"]
-        creator_name = get_full_name(user)
-
         try:
-            await db.create_command(user.id, creator_name, cmd_name, msgs)
+            await db.create_command(user.id, get_full_name(user), cmd_name, msgs)
         except Exception as e:
             logger.error(f"create_command db error: {e}")
             await send_main_menu(update, context, "Error saving command. Try again.")
@@ -263,7 +266,7 @@ async def collect_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_main_menu(
             update, context,
             f"Custom command /{cmd_name} was successfully created.\n\n"
-            "Use the menu below to create more commands or trigger existing ones."
+            "Use the menu below to create more or trigger existing ones."
         )
         return ConversationHandler.END
 
@@ -335,12 +338,12 @@ async def _handle_adding_messages(update, context, text, cmd_name, owner_id):
 
     if text in ("Add Question", "Enable Random-message Mode"):
         try:
-            await message.reply_text("Feature noted. Continue sending messages or press 'Save'.")
+            await message.reply_text("Continue sending messages or press 'Save'.")
         except Exception as e:
             logger.error(e)
         return
 
-    msg_data = _extract_message_data(message)
+    msg_data = _extract_message_data(message) if message else None
     if msg_data:
         buf = context.user_data.get("new_msgs_buffer", [])
         buf.append(msg_data)
@@ -395,16 +398,15 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data.startswith("mycmd_"):
         cmd_name = data[len("mycmd_"):]
         buttons = [
-            [InlineKeyboardButton("View Command", callback_data=f"viewcmd_{cmd_name}")],
-            [InlineKeyboardButton("Edit Messages", callback_data=f"editcmd_{cmd_name}")],
-            [InlineKeyboardButton("Configure Menu", callback_data=f"cfgmenu_{cmd_name}")],
-            [InlineKeyboardButton("Delete Command", callback_data=f"delcmd_{cmd_name}")],
-            [InlineKeyboardButton("Back", callback_data="back_main")],
+            [InlineKeyboardButton("▶ View Command", callback_data=f"viewcmd_{cmd_name}")],
+            [InlineKeyboardButton("✏️ Edit Messages", callback_data=f"editcmd_{cmd_name}")],
+            [InlineKeyboardButton("📌 Configure Menu", callback_data=f"cfgmenu_{cmd_name}")],
+            [InlineKeyboardButton("🗑 Delete Command", callback_data=f"delcmd_{cmd_name}")],
+            [InlineKeyboardButton("« Back", callback_data="back_main")],
         ]
         try:
             await query.edit_message_text(
-                f"Custom command /{cmd_name}.\n\n"
-                "Here you can view, edit, or delete this command.",
+                f"Custom command /{cmd_name}.\n\nHere you can view, edit, or delete this command.",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
         except Exception as e:
@@ -433,16 +435,16 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         lines = []
         buttons = []
         for i, m in enumerate(msgs):
-            preview = m.get("content", "")[:60] if m.get("type") == "text" else f"[{m.get('type')}]"
-            lines.append(f"{i+1}. {preview}")
+            preview = m.get("content", "")[:50] if m.get("type") == "text" else f"[{m.get('type')}]"
+            lines.append(f"{i + 1}. {preview}")
             buttons.append([InlineKeyboardButton(
-                f"🗑 Delete message {i+1}",
+                f"🗑 Delete message {i + 1}",
                 callback_data=f"delmsg_{cmd_name}_{i}"
             )])
         buttons += [
-            [InlineKeyboardButton("Add Messages to Command", callback_data=f"addmsg_{cmd_name}")],
-            [InlineKeyboardButton("Delete All Messages", callback_data=f"delmsgall_{cmd_name}")],
-            [InlineKeyboardButton("Go Back", callback_data=f"mycmd_{cmd_name}")],
+            [InlineKeyboardButton("➕ Add Messages", callback_data=f"addmsg_{cmd_name}")],
+            [InlineKeyboardButton("🗑 Delete All Messages", callback_data=f"delmsgall_{cmd_name}")],
+            [InlineKeyboardButton("« Back", callback_data=f"mycmd_{cmd_name}")],
         ]
         body = "\n".join(lines) if lines else "No messages yet."
         try:
@@ -461,9 +463,7 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 msgs.pop(idx)
                 await db.update_command_messages(user.id, cmd_name, msgs)
                 await query.answer("Message deleted.")
-                # Refresh edit view
-                fake_data = f"editcmd_{cmd_name}"
-                query.data = fake_data
+                query.data = f"editcmd_{cmd_name}"
                 await cmd_detail_callback(update, context)
 
     elif data.startswith("delmsgall_"):
@@ -480,7 +480,7 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         save_kb = ReplyKeyboardMarkup([["Save"], ["Cancel"]], resize_keyboard=True)
         try:
             await query.message.reply_text(
-                "Send everything that you want to add as a reply to this command, then press 'Save'.",
+                "Send everything you want to add as a reply to this command, then press 'Save'.",
                 reply_markup=save_kb
             )
         except Exception as e:
@@ -488,42 +488,44 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     elif data.startswith("cfgmenu_"):
         cmd_name = data[len("cfgmenu_"):]
+        # This is reached from Custom Commands → command detail → Configure Menu
+        # Show option to pin/unpin this command
+        pinned = await db.get_user_menu_items(user.id)
+        is_pinned = cmd_name in pinned
+        toggle_label = "📌 Remove from Menu" if is_pinned else "📌 Add to Main Menu"
+        toggle_cb = f"menunpin_{cmd_name}" if is_pinned else f"menupin_{cmd_name}"
         buttons = [
-            [InlineKeyboardButton("+ Add Menu Item +", callback_data=f"addmenuitem_{cmd_name}")],
-            [InlineKeyboardButton("Go Back", callback_data=f"mycmd_{cmd_name}")],
+            [InlineKeyboardButton(toggle_label, callback_data=toggle_cb)],
+            [InlineKeyboardButton("« Back", callback_data=f"mycmd_{cmd_name}")],
         ]
+        status = "✅ This command is pinned to your main menu." if is_pinned else "This command is not in your main menu."
         try:
             await query.edit_message_text(
-                "Customize your menu layout. Add items from your commands.",
+                f"/{cmd_name} — Menu Settings\n\n{status}",
                 reply_markup=InlineKeyboardMarkup(buttons)
             )
         except Exception as e:
             logger.error(e)
 
-    elif data.startswith("addmenuitem_"):
-        cmd_name = data[len("addmenuitem_"):]
-        cmds = await db.get_user_commands(user.id)
-        btns = [
-            [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"menuadd_{c['command_name']}")]
-            for c in cmds
-        ]
-        btns.append([InlineKeyboardButton("Go Back", callback_data=f"cfgmenu_{cmd_name}")])
-        try:
-            await query.edit_message_text(
-                "Choose a command to add to the menu:",
-                reply_markup=InlineKeyboardMarkup(btns)
-            )
-        except Exception as e:
-            logger.error(e)
+    elif data.startswith("menupin_"):
+        cmd_name = data[len("menupin_"):]
+        await db.add_to_user_menu(user.id, cmd_name)
+        await query.answer(f"/{cmd_name} added to your menu!", show_alert=False)
+        query.data = f"cfgmenu_{cmd_name}"
+        await cmd_detail_callback(update, context)
 
-    elif data.startswith("menuadd_"):
-        await query.answer("Menu item noted.", show_alert=False)
+    elif data.startswith("menunpin_"):
+        cmd_name = data[len("menunpin_"):]
+        await db.remove_from_user_menu(user.id, cmd_name)
+        await query.answer(f"/{cmd_name} removed from your menu.", show_alert=False)
+        query.data = f"cfgmenu_{cmd_name}"
+        await cmd_detail_callback(update, context)
 
     elif data.startswith("delcmd_"):
         cmd_name = data[len("delcmd_"):]
         buttons = [
-            [InlineKeyboardButton("Yes, Delete", callback_data=f"confirmdelcmd_{cmd_name}")],
-            [InlineKeyboardButton("Cancel", callback_data=f"mycmd_{cmd_name}")],
+            [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirmdelcmd_{cmd_name}")],
+            [InlineKeyboardButton("❌ Cancel", callback_data=f"mycmd_{cmd_name}")],
         ]
         try:
             await query.edit_message_text(
@@ -536,6 +538,7 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     elif data.startswith("confirmdelcmd_"):
         cmd_name = data[len("confirmdelcmd_"):]
         await db.delete_command(user.id, cmd_name)
+        await db.remove_from_user_menu(user.id, cmd_name)
         markup = await build_main_menu(user.id)
         try:
             await query.edit_message_text(f"Command /{cmd_name} has been deleted.")
@@ -550,15 +553,132 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ─── CONFIG MAIN MENU ──────────────────────────────────────────────────────────
 
 async def config_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Only accessible by regular users (not owner). Shows a full menu configuration UI."""
     user = update.effective_user
-    cmds = await db.get_user_commands(user.id)
-    buttons = [[InlineKeyboardButton("+ Add Menu Item +", callback_data="cfgmenu_root")]]
-    for c in cmds:
-        buttons.append([InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"cfgitem_{c['command_name']}")])
+    if user.id == OWNER_ID:
+        return
+
+    pinned = await db.get_user_menu_items(user.id)
+    all_user_cmds = await db.get_user_commands(user.id)
+    all_cmd_names = {c["command_name"] for c in all_user_cmds}
+
+    buttons = []
+
+    # Currently pinned items — show with remove button
+    if pinned:
+        for cmd_name in pinned:
+            if cmd_name in all_cmd_names:
+                buttons.append([
+                    InlineKeyboardButton(f"/{cmd_name}", callback_data=f"cfgview_{cmd_name}"),
+                    InlineKeyboardButton("❌ Remove", callback_data=f"cfgremove_{cmd_name}"),
+                ])
+            else:
+                # Command was deleted, clean it up
+                await db.remove_from_user_menu(user.id, cmd_name)
+
+    # Add new item button
+    unpinned = [c["command_name"] for c in all_user_cmds if c["command_name"] not in pinned]
+    if unpinned:
+        buttons.append([InlineKeyboardButton("➕ Add Menu Item", callback_data="cfgadd_list")])
+
     buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
+
+    status = (
+        "Your pinned commands appear as buttons in your main menu.\n"
+        "Add or remove commands below."
+        if all_user_cmds else
+        "You have no custom commands yet.\nCreate one first using 'Create Command'."
+    )
+
     try:
         await update.message.reply_text(
-            "Customize your menu layout. Select a command to configure it.",
+            f"⚙️ Configure Main Menu\n\n{status}",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
+    except Exception as e:
+        logger.error(e)
+
+
+async def config_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+    data = query.data
+
+    if data == "cfgadd_list":
+        pinned = await db.get_user_menu_items(user.id)
+        all_cmds = await db.get_user_commands(user.id)
+        unpinned = [c["command_name"] for c in all_cmds if c["command_name"] not in pinned]
+        if not unpinned:
+            await query.answer("All your commands are already in the menu.", show_alert=True)
+            return
+        buttons = [
+            [InlineKeyboardButton(f"/{n}", callback_data=f"cfgpin_{n}")]
+            for n in unpinned
+        ]
+        buttons.append([InlineKeyboardButton("« Back", callback_data="cfgback")])
+        try:
+            await query.edit_message_text(
+                "Choose a command to add to your main menu:",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+        except Exception as e:
+            logger.error(e)
+
+    elif data.startswith("cfgpin_"):
+        cmd_name = data[len("cfgpin_"):]
+        await db.add_to_user_menu(user.id, cmd_name)
+        await query.answer(f"/{cmd_name} added to your menu!")
+        await _refresh_config_menu(query, user)
+
+    elif data.startswith("cfgremove_"):
+        cmd_name = data[len("cfgremove_"):]
+        await db.remove_from_user_menu(user.id, cmd_name)
+        await query.answer(f"/{cmd_name} removed from your menu.")
+        await _refresh_config_menu(query, user)
+
+    elif data.startswith("cfgview_"):
+        cmd_name = data[len("cfgview_"):]
+        doc = await db.get_command(user.id, cmd_name)
+        if doc:
+            await _send_command_messages(query._bot if hasattr(query, '_bot') else context.bot, user.id, doc.get("messages", []))
+        else:
+            await query.answer("Command not found.", show_alert=True)
+
+    elif data == "cfgback":
+        await _refresh_config_menu(query, user)
+
+
+async def _refresh_config_menu(query, user):
+    pinned = await db.get_user_menu_items(user.id)
+    all_user_cmds = await db.get_user_commands(user.id)
+    all_cmd_names = {c["command_name"] for c in all_user_cmds}
+
+    buttons = []
+    valid_pinned = []
+    for cmd_name in pinned:
+        if cmd_name in all_cmd_names:
+            valid_pinned.append(cmd_name)
+            buttons.append([
+                InlineKeyboardButton(f"/{cmd_name}", callback_data=f"cfgview_{cmd_name}"),
+                InlineKeyboardButton("❌ Remove", callback_data=f"cfgremove_{cmd_name}"),
+            ])
+
+    unpinned = [c["command_name"] for c in all_user_cmds if c["command_name"] not in valid_pinned]
+    if unpinned:
+        buttons.append([InlineKeyboardButton("➕ Add Menu Item", callback_data="cfgadd_list")])
+
+    buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
+
+    status = (
+        "Your pinned commands appear as buttons in your main menu.\nAdd or remove commands below."
+        if all_user_cmds else
+        "You have no custom commands yet. Create one first using 'Create Command'."
+    )
+
+    try:
+        await query.edit_message_text(
+            f"⚙️ Configure Main Menu\n\n{status}",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     except Exception as e:
@@ -575,14 +695,16 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not users:
         await send_main_menu(
             update, context,
-            "Admin Panel\n\nNo other users have created commands yet.\n\n"
-            "When regular users create commands, they will appear here so you can review or delete them."
+            "👑 Admin Panel\n\n"
+            "No other users have created commands yet.\n\n"
+            "When regular users create their own commands, they will appear here "
+            "so you can review and delete inappropriate content."
         )
         return
 
     buttons = [
         [InlineKeyboardButton(
-            f"{u['creator_name']} ({u['count']} cmd{'s' if u['count'] != 1 else ''})",
+            f"{u['creator_name']} — {u['count']} cmd{'s' if u['count'] != 1 else ''}",
             callback_data=f"adminuser_{u['_id']}"
         )]
         for u in users
@@ -590,8 +712,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
     try:
         await update.message.reply_text(
-            "Admin Panel — Users with custom commands:\n"
-            "Tap a user to see and manage their commands.",
+            "👑 Admin Panel\n\nUsers who have created commands — tap a name to manage:",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     except Exception as e:
@@ -617,7 +738,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"admincmd_{target_id}_{c['command_name']}")]
             for c in cmds
         ]
-        buttons.append([InlineKeyboardButton("Go Back", callback_data="admin_back")])
+        buttons.append([InlineKeyboardButton("« Back", callback_data="admin_back")])
         try:
             await query.edit_message_text(
                 f"Commands by user {target_id}:",
@@ -632,7 +753,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cmd_name = parts[2]
         buttons = [
             [InlineKeyboardButton("🗑 Delete This Command", callback_data=f"admindelcmd_{target_id}_{cmd_name}")],
-            [InlineKeyboardButton("Go Back", callback_data=f"adminuser_{target_id}")],
+            [InlineKeyboardButton("« Back", callback_data=f"adminuser_{target_id}")],
         ]
         try:
             await query.edit_message_text(
@@ -647,16 +768,17 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(parts[1])
         cmd_name = parts[2]
         await db.delete_command(target_id, cmd_name)
+        await db.remove_from_user_menu(target_id, cmd_name)
         await query.answer(f"/{cmd_name} deleted.", show_alert=True)
         cmds = await db.get_user_commands(target_id)
         if not cmds:
-            await admin_back_view(query)
+            await _admin_back_view(query)
         else:
             buttons = [
                 [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"admincmd_{target_id}_{c['command_name']}")]
                 for c in cmds
             ]
-            buttons.append([InlineKeyboardButton("Go Back", callback_data="admin_back")])
+            buttons.append([InlineKeyboardButton("« Back", callback_data="admin_back")])
             try:
                 await query.edit_message_text(
                     f"Commands by user {target_id}:",
@@ -666,20 +788,20 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(e)
 
     elif data == "admin_back":
-        await admin_back_view(query)
+        await _admin_back_view(query)
 
 
-async def admin_back_view(query):
+async def _admin_back_view(query):
     users = await db.get_all_users_with_commands(OWNER_ID)
     if not users:
         try:
-            await query.edit_message_text("Admin Panel — No user commands found.")
+            await query.edit_message_text("👑 Admin Panel — No user commands found.")
         except Exception:
             pass
         return
     buttons = [
         [InlineKeyboardButton(
-            f"{u['creator_name']} ({u['count']} cmd{'s' if u['count'] != 1 else ''})",
+            f"{u['creator_name']} — {u['count']} cmd{'s' if u['count'] != 1 else ''}",
             callback_data=f"adminuser_{u['_id']}"
         )]
         for u in users
@@ -687,7 +809,7 @@ async def admin_back_view(query):
     buttons.append([InlineKeyboardButton("Go Back", callback_data="back_main")])
     try:
         await query.edit_message_text(
-            "Admin Panel — Users with custom commands:",
+            "👑 Admin Panel — Users with custom commands:",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
     except Exception as e:
@@ -699,9 +821,15 @@ async def admin_back_view(query):
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
+
     admin_prefixes = ("adminuser_", "admincmd_", "admindelcmd_", "admin_back")
     if any(data.startswith(p) for p in admin_prefixes):
         return await admin_callback(update, context)
+
+    cfg_prefixes = ("cfgadd_", "cfgpin_", "cfgremove_", "cfgview_", "cfgback")
+    if any(data.startswith(p) for p in cfg_prefixes) or data == "cfgback":
+        return await config_menu_callback(update, context)
+
     return await cmd_detail_callback(update, context)
 
 
@@ -732,9 +860,7 @@ def build_handlers():
         CommandHandler("start", start),
         create_conv,
         CallbackQueryHandler(callback_router),
-        # Single unified router handles ALL text including /commands from keyboard
         MessageHandler(filters.TEXT, route_message),
-        # Also handle non-text media (photos/videos/docs) for the "add messages" flow
         MessageHandler(
             filters.PHOTO | filters.VIDEO | filters.Document.ALL |
             filters.AUDIO | filters.VOICE | filters.Sticker.ALL | filters.ANIMATION,
