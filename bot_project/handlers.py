@@ -195,6 +195,16 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await db.upsert_user(user.id, get_full_name(user), user.username or "")
 
+    # ── Group chats: only respond to /commands, ignore everything else ────────
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup", "channel"):
+        clean = (text or "").replace(OWNER_BADGE, "").strip()
+        if clean.startswith("/"):
+            raw = clean[1:].split("@")[0].strip().lower()
+            if raw:
+                await trigger_command(update, context, raw)
+        return
+
     # ── "Add messages to existing command" mode ──────────────────────────────
     adding_cmd      = context.user_data.get("adding_to_cmd")
     adding_owner_id = context.user_data.get("adding_to_owner")
