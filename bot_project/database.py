@@ -9,20 +9,28 @@ client: AsyncIOMotorClient = None
 db = None
 commands_col = None
 user_menus_col = None
+users_col = None
+groups_col = None
 
 
 async def init_db():
-    global client, db, commands_col, user_menus_col
+    global client, db, commands_col, user_menus_col, users_col, groups_col
     client = AsyncIOMotorClient(MONGODB_URI)
     db = client["notebot"]
     commands_col = db["commands"]
     user_menus_col = db["user_menus"]
+    users_col = db["bot_users"]
+    groups_col = db["bot_groups"]
     await commands_col.create_index(
         [("creator_id", ASCENDING), ("command_name", ASCENDING)],
         unique=True
     )
     await user_menus_col.create_index("user_id", unique=True)
+    await users_col.create_index("user_id", unique=True)
+    await groups_col.create_index("chat_id", unique=True)
 
+
+# ─── COMMANDS ─────────────────────────────────────────────────────────────────
 
 async def get_command(creator_id: int, command_name: str):
     return await commands_col.find_one(
@@ -88,7 +96,6 @@ async def get_all_users_with_commands(owner_id: int):
 # ─── USER MENU CONFIG ──────────────────────────────────────────────────────────
 
 async def get_user_menu_items(user_id: int) -> list:
-    """Returns the list of command names the user has pinned to their menu."""
     doc = await user_menus_col.find_one({"user_id": user_id})
     return doc.get("items", []) if doc else []
 
@@ -108,9 +115,39 @@ async def remove_from_user_menu(user_id: int, command_name: str):
     )
 
 
-async def clear_user_menu(user_id: int):
-    await user_menus_col.update_one(
+# ─── USER & GROUP TRACKING ────────────────────────────────────────────────────
+
+async def upsert_user(user_id: int, name: str, username: str):
+    await users_col.update_one(
         {"user_id": user_id},
-        {"$set": {"items": []}},
+        {"$set": {"name": name, "username": username},
+         "$setOnInsert": {"user_id": user_id}},
         upsert=True
     )
+
+
+async def get_all_users() -> list:
+    cursor = users_col.find({}, {"user_id": 1, "name": 1, "username": 1})
+    return await cursor.to_list(length=None)
+
+
+async def get_user_count() -> int:
+    return await users_col.count_documents({})
+
+
+async def upsert_group(chat_id: int, title: str, chat_type: str):
+    await groups_col.update_one(
+        {"chat_id": chat_id},
+        {"$set": {"title": title, "type": chat_type},
+         "$setOnInsert": {"chat_id": chat_id}},
+        upsert=True
+    )
+
+
+async def get_all_groups() -> list:
+    cursor = groups_col.find({}, {"chat_id": 1, "title": 1, "type": 1})
+    return await cursor.to_list(length=None)
+
+
+async def get_group_count() -> int:
+    return await groups_col.count_documents({})
