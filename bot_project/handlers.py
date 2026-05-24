@@ -20,6 +20,7 @@ WAIT_CMD_NAME, WAIT_MESSAGES = range(2)
 BROADCAST_TARGET, BROADCAST_MSG = range(10, 12)
 
 OWNER_BADGE = "👑 "
+PAGE_SIZE   = 10   # messages per page when a command has many replies
 
 # Section header button labels
 HEADER_OWNER = "═══ Bot Owner Commands ═══"
@@ -97,29 +98,142 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
 
 # ─── SEND COMMAND REPLIES ─────────────────────────────────────────────────────
 
+async def _send_one_message(bot, chat_id: int, msg: dict):
+    """Send a single command message, return the sent Message object or None."""
+    try:
+        mtype   = msg.get("type")
+        caption = msg.get("caption") or None
+        if mtype == "text":
+            return await bot.send_message(chat_id, msg["content"])
+        elif mtype == "photo":
+            return await bot.send_photo(chat_id, msg["content"], caption=caption)
+        elif mtype == "video":
+            return await bot.send_video(chat_id, msg["content"], caption=caption)
+        elif mtype == "document":
+            return await bot.send_document(chat_id, msg["content"], caption=caption)
+        elif mtype == "audio":
+            return await bot.send_audio(chat_id, msg["content"], caption=caption)
+        elif mtype == "voice":
+            return await bot.send_voice(chat_id, msg["content"])
+        elif mtype == "sticker":
+            return await bot.send_sticker(chat_id, msg["content"])
+        elif mtype == "animation":
+            return await bot.send_animation(chat_id, msg["content"], caption=caption)
+    except Exception as e:
+        logger.error(f"_send_one_message ({msg.get('type')}): {e}")
+    return None
+
+
 async def _send_command_messages(bot, chat_id: int, messages: list):
     for msg in messages:
+        await _send_one_message(bot, chat_id, msg)
+
+
+# ─── PAGINATION ───────────────────────────────────────────────────────────────
+
+def _build_page_keyboard(creator_id: int, cmd_name: str, page: int, total_pages: int):
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"pg|{page-1}|{creator_id}|{cmd_name}"))
+    nav.append(InlineKeyboardButton(f"📄 {page+1}/{total_pages}", callback_data="pg_noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("Next ▶", callback_data=f"pg|{page+1}|{creator_id}|{cmd_name}"))
+    return InlineKeyboardMarkup([nav, [InlineKeyboardButton("✖ Close", callback_data="pg_close")]])
+
+
+async def _deliver_page(bot, context, chat_id: int, doc: dict, page: int,
+                        ctrl_message_id: int = None):
+    """Send (or refresh) one page of a multi-message command."""
+    messages    = doc.get("messages", [])
+    total_pages = (len(messages) + PAGE_SIZE - 1) // PAGE_SIZE
+    page        = max(0, min(page, total_pages - 1))
+    start       = page * PAGE_SIZE
+    page_msgs   = messages[start: start + PAGE_SIZE]
+
+    creator_id = doc["creator_id"]
+    cmd_name   = doc["command_name"]
+
+    # Delete previous page messages stored in user_data
+    old_ids = context.user_data.get("pg_msgs", [])
+    for mid in old_ids:
         try:
-            mtype   = msg.get("type")
-            caption = msg.get("caption") or None
-            if mtype == "text":
-                await bot.send_message(chat_id, msg["content"])
-            elif mtype == "photo":
-                await bot.send_photo(chat_id, msg["content"], caption=caption)
-            elif mtype == "video":
-                await bot.send_video(chat_id, msg["content"], caption=caption)
-            elif mtype == "document":
-                await bot.send_document(chat_id, msg["content"], caption=caption)
-            elif mtype == "audio":
-                await bot.send_audio(chat_id, msg["content"], caption=caption)
-            elif mtype == "voice":
-                await bot.send_voice(chat_id, msg["content"])
-            elif mtype == "sticker":
-                await bot.send_sticker(chat_id, msg["content"])
-            elif mtype == "animation":
-                await bot.send_animation(chat_id, msg["content"], caption=caption)
-        except Exception as e:
-            logger.error(f"_send_command_messages ({mtype}): {e}")
+            await bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
+    # Send this page's messages and track their IDs
+    sent_ids = []
+    for m in page_msgs:
+        sent = await _send_one_message(bot, chat_id, m)
+        if sent:
+            sent_ids.append(sent.message_id)
+    context.user_data["pg_msgs"] = sent_ids
+    context.user_data["pg_chat"] = chat_id
+
+    markup = _build_page_keyboard(creator_id, cmd_name, page, total_pages)
+
+    # Edit the existing control message if we have it, otherwise send a new one
+    if ctrl_message_id:
+        try:
+            await bot.edit_message_reply_markup(
+                chat_id=chat_id, message_id=ctrl_message_id, reply_markup=markup
+            )
+            context.user_data["pg_ctrl"] = ctrl_message_id
+            return
+        except Exception:
+            pass  # fall through to send new
+
+    ctrl = await bot.send_message(
+        chat_id,
+        f"📋 <b>/{cmd_name}</b> — Page <b>{page+1}</b> of <b>{total_pages}</b>",
+        reply_markup=markup,
+        parse_mode="HTML"
+    )
+    context.user_data["pg_ctrl"] = ctrl.message_id
+
+
+async def pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data == "pg_noop":
+        return
+
+    if data == "pg_close":
+        chat_id = query.message.chat_id
+        for mid in context.user_data.get("pg_msgs", []):
+            try:
+                await context.bot.delete_message(chat_id, mid)
+            except Exception:
+                pass
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        context.user_data.pop("pg_msgs", None)
+        context.user_data.pop("pg_ctrl", None)
+        context.user_data.pop("pg_chat", None)
+        return
+
+    if data.startswith("pg|"):
+        parts      = data.split("|", 3)
+        page       = int(parts[1])
+        creator_id = int(parts[2])
+        cmd_name   = parts[3]
+
+        doc = await db.get_command(creator_id, cmd_name)
+        if not doc:
+            doc = await db.get_global_command(creator_id, cmd_name)
+        if not doc:
+            await query.answer("Command not found.", show_alert=True)
+            return
+
+        await _deliver_page(
+            context.bot, context,
+            query.message.chat_id, doc, page,
+            ctrl_message_id=query.message.message_id
+        )
 
 
 # ─── START ────────────────────────────────────────────────────────────────────
@@ -318,7 +432,15 @@ async def trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE, cm
         logger.info(f"Command not found: '{cmd_name}' for user {user.id}")
         return
 
-    await _send_command_messages(context.bot, message.chat_id, doc.get("messages", []))
+    msgs = doc.get("messages", [])
+    if len(msgs) > PAGE_SIZE:
+        # Clear any previous pagination state for this user
+        context.user_data.pop("pg_msgs", None)
+        context.user_data.pop("pg_ctrl", None)
+        context.user_data.pop("pg_chat", None)
+        await _deliver_page(context.bot, context, message.chat_id, doc, 0)
+    else:
+        await _send_command_messages(context.bot, message.chat_id, msgs)
 
 
 # ─── CREATE COMMAND FLOW ──────────────────────────────────────────────────────
@@ -1216,6 +1338,10 @@ async def _admin_back_view(query):
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data  = query.data
+
+    # Pagination
+    if data.startswith("pg|") or data in ("pg_noop", "pg_close"):
+        return await pagination_callback(update, context)
 
     if any(data.startswith(p) for p in ("adminuser_", "admincmd_", "admindelcmd_")) or data == "admin_back":
         return await admin_callback(update, context)
