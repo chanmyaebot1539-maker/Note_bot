@@ -11,16 +11,18 @@ commands_col = None
 user_menus_col = None
 users_col = None
 groups_col = None
+settings_col = None
 
 
 async def init_db():
-    global client, db, commands_col, user_menus_col, users_col, groups_col
+    global client, db, commands_col, user_menus_col, users_col, groups_col, settings_col
     client = AsyncIOMotorClient(MONGODB_URI)
     db = client["notebot"]
-    commands_col = db["commands"]
+    commands_col  = db["commands"]
     user_menus_col = db["user_menus"]
-    users_col = db["bot_users"]
-    groups_col = db["bot_groups"]
+    users_col     = db["bot_users"]
+    groups_col    = db["bot_groups"]
+    settings_col  = db["bot_settings"]
     await commands_col.create_index(
         [("creator_id", ASCENDING), ("command_name", ASCENDING)],
         unique=True
@@ -28,6 +30,7 @@ async def init_db():
     await user_menus_col.create_index("user_id", unique=True)
     await users_col.create_index("user_id", unique=True)
     await groups_col.create_index("chat_id", unique=True)
+    await settings_col.create_index("key", unique=True)
 
 
 # ─── COMMANDS ─────────────────────────────────────────────────────────────────
@@ -78,6 +81,10 @@ async def delete_command(creator_id: int, command_name: str):
     await commands_col.delete_one(
         {"creator_id": creator_id, "command_name": command_name}
     )
+
+
+async def get_total_command_count() -> int:
+    return await commands_col.count_documents({})
 
 
 async def get_all_users_with_commands(owner_id: int):
@@ -151,3 +158,18 @@ async def get_all_groups() -> list:
 
 async def get_group_count() -> int:
     return await groups_col.count_documents({})
+
+
+# ─── SETTINGS ────────────────────────────────────────────────────────────────
+
+async def get_setting(key: str, default=None):
+    doc = await settings_col.find_one({"key": key})
+    return doc["value"] if doc else default
+
+
+async def set_setting(key: str, value):
+    await settings_col.update_one(
+        {"key": key},
+        {"$set": {"key": key, "value": value}},
+        upsert=True
+    )
