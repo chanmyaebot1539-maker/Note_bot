@@ -44,38 +44,21 @@ async def build_main_menu(user_id: int):
         rows.append([KeyboardButton("Create Command"), KeyboardButton("Admin Panel")])
         rows.append([KeyboardButton("My Commands")])
         rows.append([KeyboardButton("/userlist"), KeyboardButton("/grouplist"), KeyboardButton("/broadcast")])
-        # Owner's own global commands shown directly
+        # Owner commands shown as a collapsible section header too
         if global_cmds:
-            global_btns = [f"{OWNER_BADGE}/{c['command_name']}" for c in global_cmds]
-            for i in range(0, len(global_btns), 3):
-                rows.append(global_btns[i:i + 3])
+            rows.append([KeyboardButton(HEADER_OWNER)])
     else:
         # ── Regular user layout ───────────────────────────────────────────────
         rows.append([KeyboardButton("Create Command"), KeyboardButton("Config. Main Menu")])
 
-        # Section: Bot Owner Commands
+        # Collapsed section: Bot Owner Commands (tap to expand via inline keyboard)
         if global_cmds:
             rows.append([KeyboardButton(HEADER_OWNER)])
-            global_btns = [f"{OWNER_BADGE}/{c['command_name']}" for c in global_cmds]
-            for i in range(0, len(global_btns), 3):
-                rows.append(global_btns[i:i + 3])
 
-        # Section: User's pinned commands
-        pinned = await db.get_user_menu_items(user_id)
-        valid_pinned = []
-        if pinned:
-            user_cmd_names = {c["command_name"] for c in await db.get_user_commands(user_id)}
-            valid_pinned = [p for p in pinned if p in user_cmd_names]
-
-        if valid_pinned:
-            rows.append([KeyboardButton(HEADER_USER)])
-            pinned_btns = [f"/{p}" for p in valid_pinned]
-            for i in range(0, len(pinned_btns), 3):
-                rows.append(pinned_btns[i:i + 3])
-
+        # Collapsed section: Your Commands (tap to expand via inline keyboard)
         user_cmds = await db.get_user_commands(user_id)
         if user_cmds:
-            rows.append([KeyboardButton("Custom Commands")])
+            rows.append([KeyboardButton(HEADER_USER)])
 
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
@@ -209,9 +192,12 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text:
         return
 
-    # ── Ignore non-functional section header taps ──
-    if text in (HEADER_OWNER, HEADER_USER):
-        return
+    # ── Section header taps → expand into inline keyboard ──
+    if text == HEADER_OWNER:
+        return await show_owner_commands_panel(update, context)
+
+    if text == HEADER_USER:
+        return await show_my_commands_panel(update, context)
 
     # ── Menu navigation ──
     if text == "Create Command":
@@ -454,6 +440,54 @@ async def show_user_commands(update: Update, context: ContextTypes.DEFAULT_TYPE)
     label = "👑 Your Global Commands:" if user.id == OWNER_ID else "Your Custom Commands:"
     try:
         await update.message.reply_text(label, reply_markup=InlineKeyboardMarkup(buttons))
+    except Exception as e:
+        logger.error(e)
+
+
+async def show_owner_commands_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shown when any user taps the ═══ Bot Owner Commands ═══ header."""
+    global_cmds = await db.get_all_global_commands(OWNER_ID)
+    if not global_cmds:
+        try:
+            await update.message.reply_text("No global commands have been created yet.")
+        except Exception as e:
+            logger.error(e)
+        return
+
+    buttons = [
+        [InlineKeyboardButton(f"👑 /{c['command_name']}", callback_data=f"runcmd_{c['command_name']}")]
+        for c in global_cmds
+    ]
+    buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
+    try:
+        await update.message.reply_text(
+            "👑 <b>Bot Owner Commands</b>\nTap a command to run it:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(e)
+
+
+async def show_my_commands_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Shown when a user taps the ═══ Your Commands ═══ header."""
+    user = update.effective_user
+    cmds = await db.get_user_commands(user.id)
+    if not cmds:
+        await send_main_menu(update, context, "You have no custom commands yet. Use 'Create Command' to add one.")
+        return
+
+    buttons = [
+        [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"runcmd_own_{user.id}_{c['command_name']}")]
+        for c in cmds
+    ]
+    buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
+    try:
+        await update.message.reply_text(
+            "🗂 <b>Your Commands</b>\nTap a command to run it:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="HTML"
+        )
     except Exception as e:
         logger.error(e)
 
@@ -818,6 +852,40 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await context.bot.send_message(user.id, "Main menu:", reply_markup=markup)
         except Exception as e:
             logger.error(e)
+        return
+
+    if data == "close_panel":
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        return
+
+    # ── Run owner global command from panel ──
+    if data.startswith("runcmd_own_"):
+        # format: runcmd_own_{user_id}_{cmd_name}
+        rest = data[len("runcmd_own_"):]
+        parts = rest.split("_", 1)
+        try:
+            owner_id = int(parts[0])
+            cmd_name = parts[1]
+        except (IndexError, ValueError):
+            await query.answer("Invalid command.", show_alert=True)
+            return
+        doc = await db.get_command(owner_id, cmd_name)
+        if doc:
+            await _send_command_messages(context.bot, query.message.chat_id, doc.get("messages", []))
+        else:
+            await query.answer("Command not found.", show_alert=True)
+        return
+
+    if data.startswith("runcmd_"):
+        cmd_name = data[len("runcmd_"):]
+        doc = await db.get_global_command(OWNER_ID, cmd_name)
+        if doc:
+            await _send_command_messages(context.bot, query.message.chat_id, doc.get("messages", []))
+        else:
+            await query.answer("Command not found.", show_alert=True)
         return
 
     if data.startswith("sharebot_"):
