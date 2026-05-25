@@ -88,12 +88,161 @@ async def build_user_cmds_keyboard(user_id: int):
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = None):
     user = update.effective_user
     context.user_data.pop("submenu", None)
+    # Clear management state
+    for k in ("mgmt_mode", "mgmt_cmd", "mgmt_owner_id", "mgmt_new_msgs"):
+        context.user_data.pop(k, None)
     markup = await build_main_menu(user.id)
     msg = text or "Use the menu below to manage and trigger commands."
     try:
         await update.effective_message.reply_text(msg, reply_markup=markup)
     except Exception as e:
         logger.error(f"send_main_menu error: {e}")
+
+
+# ─── KEYBOARD-BASED COMMAND MANAGEMENT ────────────────────────────────────────
+
+def _mgmt_detail_keyboard():
+    return ReplyKeyboardMarkup([
+        ["View Command"],
+        ["Edit Messages"],
+        ["Configure Menu"],
+        ["Delete Command"],
+    ], resize_keyboard=True)
+
+
+def _mgmt_edit_keyboard():
+    return ReplyKeyboardMarkup([
+        ["Add Messages to Command"],
+        ["Delete All Messages"],
+        ["Go Back"],
+    ], resize_keyboard=True)
+
+
+def _mgmt_add_keyboard():
+    return ReplyKeyboardMarkup([
+        ["Add Question"],
+        ["Enable Random-message Mode"],
+        ["Save"],
+    ], resize_keyboard=True)
+
+
+def _mgmt_del_keyboard():
+    return ReplyKeyboardMarkup([["Yes"], ["Cancel"]], resize_keyboard=True)
+
+
+async def _mgmt_cfg_keyboard(user_id: int):
+    items = await db.get_user_menu_items(user_id)
+    rows  = [[item] for item in items] if items else []
+    rows.append(["✦ Add Menu Item ✦"])
+    rows.append(["Go Back"])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def _mgmt_set(context, mode, cmd_name=None, owner_id=None):
+    context.user_data["mgmt_mode"] = mode
+    if cmd_name  is not None: context.user_data["mgmt_cmd"]      = cmd_name
+    if owner_id  is not None: context.user_data["mgmt_owner_id"] = owner_id
+
+
+def _mgmt_get(context):
+    return (
+        context.user_data.get("mgmt_mode"),
+        context.user_data.get("mgmt_cmd"),
+        context.user_data.get("mgmt_owner_id"),
+    )
+
+
+def _mgmt_clear(context):
+    for k in ("mgmt_mode", "mgmt_cmd", "mgmt_owner_id", "mgmt_new_msgs"):
+        context.user_data.pop(k, None)
+
+
+async def show_my_commands_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user/owner commands as a keyboard for selection."""
+    user = update.effective_user
+    cmds = await db.get_user_commands(user.id)
+    if not cmds:
+        await send_main_menu(update, context, "You have no commands yet.")
+        return
+    _mgmt_set(context, "select_cmd", owner_id=user.id)
+    rows   = [[f"/{c['command_name']}"] for c in cmds]
+    rows.append(["Go Back"])
+    markup = ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    label  = "👑 Your Global Commands:" if user.id == OWNER_ID else "Your Commands:"
+    await update.effective_message.reply_text(
+        f"{label}\nTap a command to manage it.", reply_markup=markup
+    )
+
+
+async def _show_mgmt_detail(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                             cmd_name: str, owner_id: int):
+    """Show command detail with keyboard: View / Edit / Configure / Delete."""
+    _mgmt_set(context, "detail", cmd_name, owner_id)
+    await update.effective_message.reply_text(
+        f"Custom command /{cmd_name}.\n\n"
+        "Here you can look at the result of a command, delete it or add it to your bot's menu.",
+        reply_markup=_mgmt_detail_keyboard()
+    )
+
+
+async def _show_mgmt_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show edit-messages view with per-message delete links."""
+    _, cmd_name, owner_id = _mgmt_get(context)
+    _mgmt_set(context, "edit_msgs")
+
+    doc = await db.get_command(owner_id, cmd_name)
+    if not doc and owner_id == OWNER_ID:
+        doc = await db.get_global_command(OWNER_ID, cmd_name)
+    if not doc:
+        await send_main_menu(update, context, "Command not found.")
+        return
+
+    msgs   = doc.get("messages", [])
+    markup = _mgmt_edit_keyboard()
+
+    await update.effective_message.reply_text(
+        f"✏️ <b>Edit Messages</b> — /{cmd_name}",
+        reply_markup=markup, parse_mode="HTML"
+    )
+
+    chat_id = update.effective_chat.id
+    for i, m in enumerate(msgs):
+        del_cmd = f"/{cmd_name}_delete{i}"
+        if m.get("type") == "text":
+            try:
+                await context.bot.send_message(
+                    chat_id, f"{m['content']}\n\n🖲 Press to delete this message: {del_cmd}"
+                )
+            except Exception as e:
+                logger.error(e)
+        else:
+            await _send_one_message(context.bot, chat_id, m)
+            try:
+                await context.bot.send_message(
+                    chat_id, f"🖲 Press to delete this message: {del_cmd}"
+                )
+            except Exception as e:
+                logger.error(e)
+
+
+async def _show_mgmt_cfg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show configure-menu view."""
+    user   = update.effective_user
+    _mgmt_set(context, "cfg_menu")
+    markup = await _mgmt_cfg_keyboard(user.id)
+    pinned = await db.get_user_menu_items(user.id)
+    if pinned:
+        items_text = "\n".join(f"• /{item}" for item in pinned)
+        body = (
+            "You can customize the user menu layout. "
+            "Select an element to move, rename or delete it.\n\n" + items_text
+        )
+    else:
+        body = (
+            "You can customize the user menu layout. "
+            "Select an element to move, rename or delete it.\n\nNo items in menu yet."
+        )
+    await update.effective_message.reply_text(body, reply_markup=markup)
 
 
 # ─── SEND COMMAND REPLIES ─────────────────────────────────────────────────────
@@ -319,11 +468,154 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await trigger_command(update, context, raw)
         return
 
-    # ── "Add messages to existing command" mode ──────────────────────────────
-    adding_cmd      = context.user_data.get("adding_to_cmd")
-    adding_owner_id = context.user_data.get("adding_to_owner")
-    if adding_cmd and adding_owner_id:
-        await _handle_adding_messages(update, context, text, adding_cmd, adding_owner_id)
+    # ── Keyboard-based management mode routing ────────────────────────────────
+    mgmt_mode, mgmt_cmd, mgmt_owner_id = _mgmt_get(context)
+
+    if mgmt_mode == "select_cmd":
+        if text == "Go Back":
+            _mgmt_clear(context)
+            return await send_main_menu(update, context)
+        if text:
+            clean = text.strip()
+            if clean.startswith("/"):
+                raw = clean[1:].split("@")[0].lower()
+                doc = await db.get_command(mgmt_owner_id or user.id, raw)
+                if not doc and user.id == OWNER_ID:
+                    doc = await db.get_global_command(OWNER_ID, raw)
+                if doc:
+                    return await _show_mgmt_detail(update, context, raw, mgmt_owner_id or user.id)
+        return
+
+    if mgmt_mode == "detail":
+        if text == "View Command":
+            doc = await db.get_command(mgmt_owner_id, mgmt_cmd)
+            if not doc and mgmt_owner_id == OWNER_ID:
+                doc = await db.get_global_command(OWNER_ID, mgmt_cmd)
+            if doc:
+                msgs = doc.get("messages", [])
+                if len(msgs) > PAGE_SIZE:
+                    context.user_data.pop("pg_msgs", None)
+                    context.user_data.pop("pg_ctrl", None)
+                    context.user_data.pop("pg_chat", None)
+                    await _deliver_page(context.bot, context, message.chat_id, doc, 0)
+                else:
+                    await _send_command_messages(context.bot, message.chat_id, msgs)
+            return
+        if text == "Edit Messages":
+            return await _show_mgmt_edit(update, context)
+        if text == "Configure Menu":
+            return await _show_mgmt_cfg(update, context)
+        if text == "Delete Command":
+            _mgmt_set(context, "del_confirm")
+            await message.reply_text(
+                f"Do you really want to delete command /{mgmt_cmd}?",
+                reply_markup=_mgmt_del_keyboard()
+            )
+            return
+        # Unknown → back to main
+        _mgmt_clear(context)
+        return await send_main_menu(update, context)
+
+    if mgmt_mode == "edit_msgs":
+        if text == "Go Back":
+            return await _show_mgmt_detail(update, context, mgmt_cmd, mgmt_owner_id)
+        if text == "Add Messages to Command":
+            _mgmt_set(context, "add_msgs")
+            context.user_data["mgmt_new_msgs"] = []
+            await message.reply_text(
+                "Send everything that you want to add as a reply to this command and press 'Save'.",
+                reply_markup=_mgmt_add_keyboard()
+            )
+            return
+        if text == "Delete All Messages":
+            await db.update_command_messages(mgmt_owner_id, mgmt_cmd, [])
+            await message.reply_text(f"✅ All messages deleted from /{mgmt_cmd}.")
+            return await _show_mgmt_edit(update, context)
+        # Individual delete: /{cmd}_delete{idx}
+        if text and text.startswith(f"/{mgmt_cmd}_delete"):
+            idx_str = text[len(f"/{mgmt_cmd}_delete"):]
+            if idx_str.isdigit():
+                idx = int(idx_str)
+                doc = await db.get_command(mgmt_owner_id, mgmt_cmd)
+                if not doc and mgmt_owner_id == OWNER_ID:
+                    doc = await db.get_global_command(OWNER_ID, mgmt_cmd)
+                if doc:
+                    msgs = doc.get("messages", [])
+                    if 0 <= idx < len(msgs):
+                        msgs.pop(idx)
+                        await db.update_command_messages(mgmt_owner_id, mgmt_cmd, msgs)
+                        await message.reply_text("✅ Message deleted.")
+            return await _show_mgmt_edit(update, context)
+        return
+
+    if mgmt_mode == "add_msgs":
+        if text == "Save":
+            new_msgs = context.user_data.pop("mgmt_new_msgs", [])
+            doc      = await db.get_command(mgmt_owner_id, mgmt_cmd)
+            if not doc and mgmt_owner_id == OWNER_ID:
+                doc = await db.get_global_command(OWNER_ID, mgmt_cmd)
+            existing = doc.get("messages", []) if doc else []
+            await db.update_command_messages(mgmt_owner_id, mgmt_cmd, existing + new_msgs)
+            await message.reply_text(f"Custom command /{mgmt_cmd} was successfully updated.")
+            return await _show_mgmt_detail(update, context, mgmt_cmd, mgmt_owner_id)
+        if text in ("Add Question", "Enable Random-message Mode"):
+            await message.reply_text("This feature is coming soon! Send your messages and press Save.")
+            return
+        # Collect message into buffer
+        msg_data = _extract_message_data(message)
+        if msg_data:
+            buf = context.user_data.get("mgmt_new_msgs", [])
+            buf.append(msg_data)
+            context.user_data["mgmt_new_msgs"] = buf
+            await message.reply_text(f"Message added ({len(buf)} new). Send more or press Save.")
+        return
+
+    if mgmt_mode == "del_confirm":
+        if text == "Yes":
+            await db.delete_command(mgmt_owner_id, mgmt_cmd)
+            await db.remove_from_user_menu(mgmt_owner_id, mgmt_cmd)
+            _mgmt_clear(context)
+            return await send_main_menu(update, context, f"✅ Command /{mgmt_cmd} deleted.")
+        # Cancel or anything else → back to detail
+        _mgmt_set(context, "detail")
+        return await _show_mgmt_detail(update, context, mgmt_cmd, mgmt_owner_id)
+
+    if mgmt_mode == "cfg_menu":
+        if text == "Go Back":
+            return await _show_mgmt_detail(update, context, mgmt_cmd, mgmt_owner_id)
+        if text == "✦ Add Menu Item ✦":
+            pinned   = await db.get_user_menu_items(user.id)
+            all_cmds = await db.get_user_commands(user.id)
+            unpinned = [c for c in all_cmds if c["command_name"] not in pinned]
+            if not unpinned:
+                await message.reply_text("All your commands are already in the menu.")
+                return
+            _mgmt_set(context, "cfg_add_item")
+            rows = [[f"/{c['command_name']}"] for c in unpinned]
+            rows.append(["Go Back"])
+            await message.reply_text(
+                "Choose a command to add to your menu:",
+                reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True)
+            )
+            return
+        # Tap on an existing pinned item → remove it
+        if text and text.startswith("/"):
+            cmd_n = text[1:].lower()
+            pinned = await db.get_user_menu_items(user.id)
+            if cmd_n in pinned:
+                await db.remove_from_user_menu(user.id, cmd_n)
+                await message.reply_text(f"/{cmd_n} removed from menu.")
+            return await _show_mgmt_cfg(update, context)
+        return
+
+    if mgmt_mode == "cfg_add_item":
+        if text == "Go Back":
+            return await _show_mgmt_cfg(update, context)
+        if text and text.startswith("/"):
+            cmd_n = text[1:].lower()
+            await db.add_to_user_menu(user.id, cmd_n)
+            await message.reply_text(f"/{cmd_n} added to your menu!")
+            return await _show_mgmt_cfg(update, context)
         return
 
     if not text:
@@ -346,7 +638,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if submenu == "user_cmds":
         if text == "✏️ Manage Commands":
-            return await show_user_manage_inline(update, context)
+            return await show_my_commands_list(update, context)
         clean = text.strip()
         if clean.startswith("/"):
             raw = clean[1:].split("@")[0].lower()
@@ -383,7 +675,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await admin_panel(update, context)
 
     if text == "My Commands" and user.id == OWNER_ID:
-        return await show_user_manage_inline(update, context)
+        return await show_my_commands_list(update, context)
 
     if text == "⚙️ Settings" and user.id == OWNER_ID:
         return await owner_settings(update, context)
@@ -561,55 +853,6 @@ def _extract_message_data(message):
     return None
 
 
-# ─── ADD MESSAGES TO EXISTING COMMAND ────────────────────────────────────────
-
-async def _handle_adding_messages(update, context, text, cmd_name, adding_owner_id):
-    message = update.message
-    if text == "Cancel":
-        context.user_data.pop("adding_to_cmd", None)
-        context.user_data.pop("adding_to_owner", None)
-        context.user_data.pop("new_msgs_buffer", None)
-        await send_main_menu(update, context, "Cancelled.")
-        return
-
-    if text == "Save":
-        new_msgs = context.user_data.pop("new_msgs_buffer", [])
-        doc      = await db.get_command(adding_owner_id, cmd_name)
-        existing = doc.get("messages", []) if doc else []
-        await db.update_command_messages(adding_owner_id, cmd_name, existing + new_msgs)
-        context.user_data.pop("adding_to_cmd", None)
-        context.user_data.pop("adding_to_owner", None)
-        await send_main_menu(update, context, f"✅ Command /{cmd_name} updated.")
-        return
-
-    msg_data = _extract_message_data(message) if message else None
-    if msg_data:
-        buf = context.user_data.get("new_msgs_buffer", [])
-        buf.append(msg_data)
-        context.user_data["new_msgs_buffer"] = buf
-        await message.reply_text(f"Message added ({len(buf)} new). Send more or press Save.")
-
-
-# ─── MANAGE COMMANDS (INLINE) ─────────────────────────────────────────────────
-
-async def show_user_manage_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inline management list for the current user's own commands."""
-    user = update.effective_user
-    cmds = await db.get_user_commands(user.id)
-    if not cmds:
-        await send_main_menu(update, context, "You have no commands yet.")
-        return
-
-    buttons = [
-        [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"mycmd_{c['command_name']}")]
-        for c in cmds
-    ]
-    buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
-    label = "👑 Your Global Commands — select to manage:" if user.id == OWNER_ID else "Your Commands — select to manage:"
-    try:
-        await update.message.reply_text(label, reply_markup=InlineKeyboardMarkup(buttons))
-    except Exception as e:
-        logger.error(e)
 
 
 # ─── OWNER SETTINGS ──────────────────────────────────────────────────────────
@@ -1152,14 +1395,12 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if data.startswith("addmsg_"):
         cmd_name = data[len("addmsg_"):]
-        context.user_data["adding_to_cmd"]   = cmd_name
-        context.user_data["adding_to_owner"] = user.id
-        save_kb = ReplyKeyboardMarkup([["Save"], ["Cancel"]], resize_keyboard=True)
+        _mgmt_set(context, "add_msgs", cmd_name, user.id)
+        context.user_data["mgmt_new_msgs"] = []
         try:
             await query.message.reply_text(
-                "Send the messages you want to add, then press <b>Save</b>.",
-                reply_markup=save_kb,
-                parse_mode="HTML"
+                "Send everything that you want to add as a reply to this command and press 'Save'.",
+                reply_markup=_mgmt_add_keyboard()
             )
         except Exception as e:
             logger.error(e)
