@@ -182,10 +182,27 @@ async def get_stored_owner_id() -> int | None:
     return doc["value"] if doc else None
 
 
+async def find_likely_old_owner(current_owner_id: int) -> int | None:
+    """
+    commands collection ထဲမှ current_owner_id မဟုတ်သော creator_id တွင်
+    commands အများဆုံး ပိုင်ဆိုင်သူကို ဟောင်းသော owner ဟု ယူဆပြီး ပြန်သည်။
+    """
+    pipeline = [
+        {"$match": {"creator_id": {"$ne": current_owner_id}}},
+        {"$group": {"_id": "$creator_id", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 1},
+    ]
+    result = await commands_col.aggregate(pipeline).to_list(1)
+    if result:
+        return result[0]["_id"]
+    return None
+
+
 async def migrate_owner_commands(old_owner_id: int, new_owner_id: int) -> int:
     """
-    MongoDB တွင် old_owner_id ဖြင့် သိမ်းထားသော commands အားလုံးကို
-    new_owner_id သို့ ပြောင်းပေးသည်။ ပြောင်းလဲသော commands အရေအတွက် ပြန်သည်။
+    old_owner_id ဖြင့် သိမ်းထားသော commands အားလုံးကို new_owner_id သို့ ပြောင်းသည်။
+    ပြောင်းလဲသော commands အရေအတွက် ပြန်သည်။
     """
     result = await commands_col.update_many(
         {"creator_id": old_owner_id},
