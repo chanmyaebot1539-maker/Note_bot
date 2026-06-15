@@ -14,7 +14,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-PORT = int(os.environ.get("PORT", 8080))
+PORT      = int(os.environ.get("PORT", 8080))
+OWNER_ID  = int(os.environ.get("OWNER_ID", 0))
 
 
 async def health(request):
@@ -43,8 +44,40 @@ async def error_handler(update: object, context):
             pass
 
 
+async def run_owner_migration():
+    """
+    OWNER_ID ပြောင်းလဲသွားပါက MongoDB တွင် ဟောင်းသော owner ၏
+    commands အားလုံးကို အသစ်သော OWNER_ID သို့ auto-migrate လုပ်သည်။
+    """
+    if OWNER_ID == 0:
+        logger.warning("OWNER_ID is not set (defaulting to 0). Owner commands will not work correctly.")
+        return
+
+    stored_owner_id = await db.get_stored_owner_id()
+
+    if stored_owner_id is None:
+        logger.info(f"First run — storing OWNER_ID={OWNER_ID} in database.")
+        await db.set_setting("active_owner_id", OWNER_ID)
+        return
+
+    if stored_owner_id == OWNER_ID:
+        logger.info(f"OWNER_ID={OWNER_ID} unchanged. No migration needed.")
+        return
+
+    logger.warning(
+        f"OWNER_ID changed: {stored_owner_id} → {OWNER_ID}. "
+        "Migrating owner commands in MongoDB..."
+    )
+    count = await db.migrate_owner_commands(stored_owner_id, OWNER_ID)
+    logger.info(
+        f"Migration complete. {count} command(s) reassigned from "
+        f"owner {stored_owner_id} to {OWNER_ID}."
+    )
+
+
 async def main():
     await db.init_db()
+    await run_owner_migration()
 
     application = (
         ApplicationBuilder()
