@@ -46,8 +46,8 @@ async def error_handler(update: object, context):
 
 async def run_owner_migration():
     """
-    OWNER_ID ပြောင်းလဲသွားပါက MongoDB တွင် ဟောင်းသော owner ၏
-    commands အားလုံးကို အသစ်သော OWNER_ID သို့ auto-migrate လုပ်သည်။
+    Bot startup တွင် OWNER_ID ပြောင်းလဲမှုကို စစ်ဆေးပြီး
+    ဟောင်းသော owner ၏ commands များကို အသစ်သော OWNER_ID သို့ auto-migrate လုပ်သည်။
     """
     if OWNER_ID == 0:
         logger.warning("OWNER_ID is not set (defaulting to 0). Owner commands will not work correctly.")
@@ -55,24 +55,32 @@ async def run_owner_migration():
 
     stored_owner_id = await db.get_stored_owner_id()
 
-    if stored_owner_id is None:
-        logger.info(f"First run — storing OWNER_ID={OWNER_ID} in database.")
-        await db.set_setting("active_owner_id", OWNER_ID)
-        return
-
+    # ── Case 1: OWNER_ID မပြောင်း ──────────────────────────────────────────
     if stored_owner_id == OWNER_ID:
         logger.info(f"OWNER_ID={OWNER_ID} unchanged. No migration needed.")
         return
 
-    logger.warning(
-        f"OWNER_ID changed: {stored_owner_id} → {OWNER_ID}. "
-        "Migrating owner commands in MongoDB..."
-    )
-    count = await db.migrate_owner_commands(stored_owner_id, OWNER_ID)
-    logger.info(
-        f"Migration complete. {count} command(s) reassigned from "
-        f"owner {stored_owner_id} to {OWNER_ID}."
-    )
+    # ── Case 2: stored ID ရှိ၊ ပြောင်းသွား ──────────────────────────────────
+    if stored_owner_id is not None and stored_owner_id != OWNER_ID:
+        logger.warning(f"OWNER_ID changed: {stored_owner_id} → {OWNER_ID}. Migrating...")
+        count = await db.migrate_owner_commands(stored_owner_id, OWNER_ID)
+        logger.info(f"Migration complete: {count} command(s) moved to OWNER_ID={OWNER_ID}.")
+        return
+
+    # ── Case 3: stored ID မရှိ (ပထမ run သို့မဟုတ် ဟောင်း code မှ တင်မြှောက်) ──
+    # DB ထဲတွင် current OWNER_ID မဟုတ်သော commands ရှိ/မရှိ ရှာသည်
+    old_owner_id = await db.find_likely_old_owner(OWNER_ID)
+
+    if old_owner_id is not None:
+        logger.warning(
+            f"Detected existing commands under old owner ID={old_owner_id}. "
+            f"Migrating to new OWNER_ID={OWNER_ID}..."
+        )
+        count = await db.migrate_owner_commands(old_owner_id, OWNER_ID)
+        logger.info(f"Auto-migration complete: {count} command(s) reassigned to OWNER_ID={OWNER_ID}.")
+    else:
+        logger.info(f"First run. Storing OWNER_ID={OWNER_ID}.")
+        await db.set_setting("active_owner_id", OWNER_ID)
 
 
 async def main():
