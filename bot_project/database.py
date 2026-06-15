@@ -173,3 +173,29 @@ async def set_setting(key: str, value):
         {"$set": {"key": key, "value": value}},
         upsert=True
     )
+
+
+# ─── OWNER ID MIGRATION ───────────────────────────────────────────────────────
+
+async def get_stored_owner_id() -> int | None:
+    doc = await settings_col.find_one({"key": "active_owner_id"})
+    return doc["value"] if doc else None
+
+
+async def migrate_owner_commands(old_owner_id: int, new_owner_id: int) -> int:
+    """
+    MongoDB တွင် old_owner_id ဖြင့် သိမ်းထားသော commands အားလုံးကို
+    new_owner_id သို့ ပြောင်းပေးသည်။ ပြောင်းလဲသော commands အရေအတွက် ပြန်သည်။
+    """
+    result = await commands_col.update_many(
+        {"creator_id": old_owner_id},
+        {"$set": {"creator_id": new_owner_id, "creator_name": "Bot Owner"}}
+    )
+    old_menu = await user_menus_col.find_one({"user_id": old_owner_id})
+    if old_menu:
+        await user_menus_col.update_one(
+            {"user_id": old_owner_id},
+            {"$set": {"user_id": new_owner_id}},
+        )
+    await set_setting("active_owner_id", new_owner_id)
+    return result.modified_count
