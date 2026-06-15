@@ -1596,6 +1596,43 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await cmd_detail_callback(update, context)
 
 
+# ─── FIX MIGRATION COMMAND ───────────────────────────────────────────────────
+
+async def cmd_fix_migration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: ဟောင်းသော OWNER_ID ၏ commands များကို လက်ရှိ OWNER_ID သို့ migrate လုပ်သည်။"""
+    if update.effective_user.id != OWNER_ID:
+        return
+
+    msg = await update.effective_message.reply_text(
+        "🔍 MongoDB ထဲတွင် ဟောင်းသော owner commands ရှာဖွေနေသည်..."
+    )
+
+    try:
+        old_owner_id = await db.find_likely_old_owner(OWNER_ID)
+
+        if old_owner_id is None:
+            await msg.edit_text(
+                "✅ Migration မလိုအပ်ပါ။\n\n"
+                "Commands အားလုံး လက်ရှိ OWNER_ID ဖြင့် ရှိနေပြီးသားဖြစ်သည်\n"
+                "သို့မဟုတ် database ထဲတွင် commands မရှိသေးပါ။"
+            )
+            return
+
+        count = await db.migrate_owner_commands(old_owner_id, OWNER_ID)
+
+        await msg.edit_text(
+            f"✅ <b>Migration ပြီးပါပြီ!</b>\n\n"
+            f"Commands <b>{count}</b> ခု ပြောင်းရွှေ့ပြီး\n"
+            f"ဟောင်းသော ID: <code>{old_owner_id}</code>\n"
+            f"အသစ်သော ID: <code>{OWNER_ID}</code>\n\n"
+            "ယခု 'My Commands' ကို နှိပ်ကြည့်ပါ — commands ပြန်ပေါ်လာမည်!",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"cmd_fix_migration error: {e}")
+        await msg.edit_text(f"❌ Error: {e}")
+
+
 # ─── HANDLER REGISTRATION ────────────────────────────────────────────────────
 
 def build_handlers():
@@ -1629,10 +1666,11 @@ def build_handlers():
     )
 
     return [
-        CommandHandler("start",     start),
-        CommandHandler("userlist",  cmd_userlist),
-        CommandHandler("grouplist", cmd_grouplist),
-        CommandHandler("stats",     cmd_stats),
+        CommandHandler("start",          start),
+        CommandHandler("userlist",       cmd_userlist),
+        CommandHandler("grouplist",      cmd_grouplist),
+        CommandHandler("stats",          cmd_stats),
+        CommandHandler("fixmigration",   cmd_fix_migration),
         create_conv,
         broadcast_conv,
         CallbackQueryHandler(callback_router),
