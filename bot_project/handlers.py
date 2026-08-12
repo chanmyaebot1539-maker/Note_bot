@@ -37,6 +37,40 @@ def get_full_name(user):
     return name.strip() or user.username or str(user.id)
 
 
+def styled_button(text: str, *, style: str = "primary", callback_data: str = None,
+                  url: str = None):
+    """Create a Telegram inline button with Bot API button styling.
+
+    python-telegram-bot 21.x does not expose ``style`` as a first-class
+    constructor argument yet, but it safely forwards additional Bot API
+    fields through ``api_kwargs``.  Keeping this in one helper also makes the
+    visual language consistent across every inline panel.
+    """
+    kwargs = {
+        "text": text,
+        "api_kwargs": {"style": style},
+    }
+    if callback_data is not None:
+        kwargs["callback_data"] = callback_data
+    if url is not None:
+        kwargs["url"] = url
+    return InlineKeyboardButton(**kwargs)
+
+
+def create_prompt_keyboard(*, include_save: bool = False):
+    """Inline controls for the create-command conversation.
+
+    Reply keyboards cannot carry Telegram's per-button styles. These controls
+    are therefore inline, while the original text commands (Save/Cancel) are
+    still accepted by the conversation handlers for backwards compatibility.
+    """
+    rows = []
+    if include_save:
+        rows.append([styled_button("Save", style="success", callback_data="conv_save")])
+    rows.append([styled_button("Cancel", style="danger", callback_data="conv_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
 # ─── MENUS ────────────────────────────────────────────────────────────────────
 
 async def build_main_menu(user_id: int):
@@ -44,21 +78,52 @@ async def build_main_menu(user_id: int):
     rows = []
 
     if user_id == OWNER_ID:
-        rows.append([KeyboardButton("Create Command"), KeyboardButton("Admin Panel")])
-        rows.append([KeyboardButton("My Commands"), KeyboardButton("⚙️ Settings")])
-        rows.append([KeyboardButton("/userlist"), KeyboardButton("/grouplist"), KeyboardButton("/broadcast")])
-        rows.append([KeyboardButton("/stats")])
+        rows.append([
+            styled_button("Create Command", style="success", callback_data="menu_create"),
+            styled_button("Admin Panel", style="primary", callback_data="menu_admin"),
+        ])
+        rows.append([
+            styled_button("My Commands", style="primary", callback_data="menu_my_commands"),
+            styled_button("⚙️ Settings", style="primary", callback_data="menu_settings"),
+        ])
+        rows.append([
+            styled_button("/userlist", style="success", callback_data="menu_userlist"),
+            styled_button("/grouplist", style="success", callback_data="menu_grouplist"),
+            styled_button("/broadcast", style="success", callback_data="menu_broadcast"),
+        ])
+        rows.append([styled_button("/stats", style="success", callback_data="menu_stats")])
         if global_cmds:
-            rows.append([KeyboardButton(HEADER_OWNER)])
+            rows.append([
+                styled_button(
+                    HEADER_OWNER,
+                    style="primary",
+                    callback_data="menu_owner_commands",
+                )
+            ])
     else:
-        rows.append([KeyboardButton("Create Command"), KeyboardButton("Config. Main Menu")])
+        rows.append([
+            styled_button("Create Command", style="success", callback_data="menu_create"),
+            styled_button("Config. Main Menu", style="primary", callback_data="menu_config"),
+        ])
         if global_cmds:
-            rows.append([KeyboardButton(HEADER_OWNER)])
+            rows.append([
+                styled_button(
+                    HEADER_OWNER,
+                    style="primary",
+                    callback_data="menu_owner_commands",
+                )
+            ])
         user_cmds = await db.get_user_commands(user_id)
         if user_cmds:
-            rows.append([KeyboardButton(HEADER_USER)])
+            rows.append([
+                styled_button(
+                    HEADER_USER,
+                    style="primary",
+                    callback_data="menu_user_commands",
+                )
+            ])
 
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    return InlineKeyboardMarkup(rows)
 
 
 async def build_owner_cmds_keyboard():
@@ -66,11 +131,18 @@ async def build_owner_cmds_keyboard():
     global_cmds = await db.get_all_global_commands(OWNER_ID)
     rows = []
     if global_cmds:
-        btns = [f"{OWNER_BADGE}/{c['command_name']}" for c in global_cmds]
+        btns = [
+            styled_button(
+                f"{OWNER_BADGE}/{c['command_name']}",
+                style="success",
+                callback_data=f"run_global_{c['command_name']}",
+            )
+            for c in global_cmds
+        ]
         for i in range(0, len(btns), 3):
             rows.append(btns[i:i + 3])
-    rows.append([BTN_BACK])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    rows.append([styled_button(BTN_BACK, style="danger", callback_data="menu_back")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def build_user_cmds_keyboard(user_id: int):
@@ -78,11 +150,25 @@ async def build_user_cmds_keyboard(user_id: int):
     cmds = await db.get_user_commands(user_id)
     rows = []
     if cmds:
-        btns = [f"/{c['command_name']}" for c in cmds]
+        btns = [
+            styled_button(
+                f"/{c['command_name']}",
+                style="success",
+                callback_data=f"run_user_{c['command_name']}",
+            )
+            for c in cmds
+        ]
         for i in range(0, len(btns), 3):
             rows.append(btns[i:i + 3])
-    rows.append([KeyboardButton("✏️ Manage Commands"), KeyboardButton(BTN_BACK)])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    rows.append([
+        styled_button(
+            "✏️ Manage Commands",
+            style="primary",
+            callback_data="menu_my_commands",
+        ),
+        styled_button(BTN_BACK, style="danger", callback_data="menu_back"),
+    ])
+    return InlineKeyboardMarkup(rows)
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = None):
@@ -158,16 +244,25 @@ def _mgmt_clear(context):
 
 
 async def show_my_commands_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user/owner commands as a keyboard for selection."""
+    """Show user/owner commands as styled inline buttons for selection."""
     user = update.effective_user
     cmds = await db.get_user_commands(user.id)
     if not cmds:
         await send_main_menu(update, context, "You have no commands yet.")
         return
     _mgmt_set(context, "select_cmd", owner_id=user.id)
-    rows   = [[f"/{c['command_name']}"] for c in cmds]
-    rows.append(["Go Back"])
-    markup = ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    rows = [
+        [
+            styled_button(
+                f"/{c['command_name']}",
+                style="success",
+                callback_data=f"mycmd_{c['command_name']}",
+            )
+        ]
+        for c in cmds
+    ]
+    rows.append([styled_button("◀ Back", style="danger", callback_data="menu_back")])
+    markup = InlineKeyboardMarkup(rows)
     label  = "👑 Your Global Commands:" if user.id == OWNER_ID else "Your Commands:"
     await update.effective_message.reply_text(
         f"{label}\nTap a command to manage it.", reply_markup=markup
@@ -283,11 +378,26 @@ async def _send_command_messages(bot, chat_id: int, messages: list):
 def _build_page_keyboard(creator_id: int, cmd_name: str, page: int, total_pages: int):
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"pg|{page-1}|{creator_id}|{cmd_name}"))
-    nav.append(InlineKeyboardButton(f"📄 {page+1}/{total_pages}", callback_data="pg_noop"))
+        nav.append(styled_button(
+            "◀ Prev",
+            style="primary",
+            callback_data=f"pg|{page-1}|{creator_id}|{cmd_name}",
+        ))
+    nav.append(styled_button(
+        f"📄 {page+1}/{total_pages}",
+        style="primary",
+        callback_data="pg_noop",
+    ))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton("Next ▶", callback_data=f"pg|{page+1}|{creator_id}|{cmd_name}"))
-    return InlineKeyboardMarkup([nav, [InlineKeyboardButton("✖ Close", callback_data="pg_close")]])
+        nav.append(styled_button(
+            "Next ▶",
+            style="primary",
+            callback_data=f"pg|{page+1}|{creator_id}|{cmd_name}",
+        ))
+    return InlineKeyboardMarkup([
+        nav,
+        [styled_button("✖ Close", style="danger", callback_data="pg_close")],
+    ])
 
 
 async def _deliver_page(bot, context, chat_id: int, doc: dict, page: int,
@@ -419,10 +529,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     inline_buttons = [
-        [InlineKeyboardButton("➕ Add me to your chat!", url=f"https://t.me/{bot_username}?startgroup=true")],
         [
-            InlineKeyboardButton("🎵 Music bot", url="https://t.me/music100200bot?start=tg"),
-            InlineKeyboardButton("🔗 Share bot", callback_data=f"sharebot_{user.id}"),
+            styled_button(
+                "➕ Add me to your chat!",
+                style="success",
+                url=f"https://t.me/{bot_username}?startgroup=true",
+            )
+        ],
+        [
+            styled_button(
+                "🎵 Music bot",
+                style="success",
+                url="https://t.me/music100200bot?start=tg",
+            ),
+            styled_button(
+                "🔗 Share bot",
+                style="success",
+                callback_data=f"sharebot_{user.id}",
+            ),
         ],
     ]
 
@@ -705,6 +829,26 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_main_menu(update, context)
 
 
+async def _run_command_for_chat(bot, context, chat_id: int, user_id: int, cmd_name: str):
+    """Resolve and send a command for both text and inline-button triggers."""
+    doc = await db.get_global_command(OWNER_ID, cmd_name)
+    if not doc:
+        doc = await db.get_command(user_id, cmd_name)
+
+    if not doc:
+        logger.info(f"Command not found: '{cmd_name}' for user {user_id}")
+        return
+
+    msgs = doc.get("messages", [])
+    if len(msgs) > PAGE_SIZE:
+        context.user_data.pop("pg_msgs", None)
+        context.user_data.pop("pg_ctrl", None)
+        context.user_data.pop("pg_chat", None)
+        await _deliver_page(bot, context, chat_id, doc, 0)
+    else:
+        await _send_command_messages(bot, chat_id, msgs)
+
+
 async def trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE, cmd_name: str = None):
     user    = update.effective_user
     message = update.message
@@ -716,29 +860,21 @@ async def trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE, cm
     if not cmd_name:
         return
 
-    doc = await db.get_global_command(OWNER_ID, cmd_name)
-    if not doc:
-        doc = await db.get_command(user.id, cmd_name)
-
-    if not doc:
-        logger.info(f"Command not found: '{cmd_name}' for user {user.id}")
-        return
-
-    msgs = doc.get("messages", [])
-    if len(msgs) > PAGE_SIZE:
-        # Clear any previous pagination state for this user
-        context.user_data.pop("pg_msgs", None)
-        context.user_data.pop("pg_ctrl", None)
-        context.user_data.pop("pg_chat", None)
-        await _deliver_page(context.bot, context, message.chat_id, doc, 0)
-    else:
-        await _send_command_messages(context.bot, message.chat_id, msgs)
+    await _run_command_for_chat(
+        context.bot,
+        context,
+        message.chat_id,
+        user.id,
+        cmd_name,
+    )
 
 
 # ─── CREATE COMMAND FLOW ──────────────────────────────────────────────────────
 
 async def create_command_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if update.callback_query:
+        await update.callback_query.answer()
 
     # Check if user creation is allowed (only for non-owners)
     if user.id != OWNER_ID:
@@ -751,12 +887,11 @@ async def create_command_start(update: Update, context: ContextTypes.DEFAULT_TYP
             return ConversationHandler.END
 
     context.user_data.clear()
-    cancel_kb = ReplyKeyboardMarkup([["Cancel"]], resize_keyboard=True)
     try:
         await update.effective_message.reply_text(
             "Enter the command name. Use only Latin letters, numbers and '_'.\n\n"
             "Examples:\n/website\n/pricelist\n/contacts\n/best_music\n/best_photos",
-            reply_markup=cancel_kb
+            reply_markup=create_prompt_keyboard()
         )
     except Exception as e:
         logger.error(e)
@@ -777,15 +912,11 @@ async def received_cmd_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cmd_name"]  = text.lower()
     context.user_data["messages"]  = []
 
-    save_kb = ReplyKeyboardMarkup(
-        [["Save"], ["Cancel"]],
-        resize_keyboard=True
-    )
     try:
         await update.message.reply_text(
             "Send everything you want the bot to reply with "
             "(text, photos, videos, files...) then press <b>Save</b>.",
-            reply_markup=save_kb,
+            reply_markup=create_prompt_keyboard(include_save=True),
             parse_mode="HTML"
         )
     except Exception as e:
@@ -823,13 +954,45 @@ async def collect_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if msg_data:
         context.user_data["messages"].append(msg_data)
         count = len(context.user_data["messages"])
-        await message.reply_text(f"Message added ({count} total). Send more or press Save.")
+        await message.reply_text(
+            f"Message added ({count} total). Send more or press Save.",
+            reply_markup=create_prompt_keyboard(include_save=True),
+        )
     return WAIT_MESSAGES
 
 
 async def cancel_conv(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await send_main_menu(update, context, "Cancelled.")
+    return ConversationHandler.END
+
+
+async def cancel_conv_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data.clear()
+    await send_main_menu(update, context, "Cancelled.")
+    return ConversationHandler.END
+
+
+async def save_create_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    msgs = context.user_data.get("messages", [])
+    if not msgs:
+        await query.answer("Please send at least one message before saving.", show_alert=True)
+        return WAIT_MESSAGES
+
+    await query.answer()
+    user = query.from_user
+    cmd_name = context.user_data["cmd_name"]
+    try:
+        await db.create_command(user.id, get_full_name(user), cmd_name, msgs)
+    except Exception as e:
+        logger.error(f"create_command db error: {e}")
+        await send_main_menu(update, context, "Error saving command. Try again.")
+        return ConversationHandler.END
+
+    await send_main_menu(update, context, f"✅ Command /{cmd_name} created successfully!")
     return ConversationHandler.END
 
 
@@ -864,14 +1027,15 @@ async def owner_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status  = "✅ ON" if allowed else "❌ OFF"
     toggle_label = "Turn OFF" if allowed else "Turn ON"
     buttons = [
-        [InlineKeyboardButton(
+        [styled_button(
             f"User Command Creation: {status}  →  {toggle_label}",
+            style="primary",
             callback_data="toggle_user_create"
         )],
-        [InlineKeyboardButton("✖ Close", callback_data="close_panel")],
+        [styled_button("✖ Close", style="danger", callback_data="close_panel")],
     ]
     try:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "⚙️ <b>Bot Settings</b>\n\n"
             f"<b>User Command Creation:</b> {status}\n\n"
             "When OFF, regular users cannot create new commands.",
@@ -967,11 +1131,21 @@ def _split_text(text: str, limit: int = 4000):
 async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return ConversationHandler.END
+    if update.callback_query:
+        await update.callback_query.answer()
     user_count = await db.get_user_count()
     buttons = [
-        [InlineKeyboardButton(f"📢 All Users ({user_count})", callback_data="bc_all")],
-        [InlineKeyboardButton("👤 Specific User", callback_data="bc_choose")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="bc_cancel")],
+        [styled_button(
+            f"📢 All Users ({user_count})",
+            style="success",
+            callback_data="bc_all",
+        )],
+        [styled_button(
+            "👤 Specific User",
+            style="primary",
+            callback_data="bc_choose",
+        )],
+        [styled_button("❌ Cancel", style="danger", callback_data="bc_cancel")],
     ]
     try:
         await update.effective_message.reply_text(
@@ -1016,10 +1190,14 @@ async def broadcast_target_callback(update: Update, context: ContextTypes.DEFAUL
             await query.answer("No users found.", show_alert=True)
             return ConversationHandler.END
         buttons = [
-            [InlineKeyboardButton(f"{u['name']} ({u['user_id']})", callback_data=f"bc_user_{u['user_id']}")]
+            [styled_button(
+                f"{u['name']} ({u['user_id']})",
+                style="success",
+                callback_data=f"bc_user_{u['user_id']}",
+            )]
             for u in users[:50]
         ]
-        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="bc_cancel")])
+        buttons.append([styled_button("❌ Cancel", style="danger", callback_data="bc_cancel")])
         try:
             await query.edit_message_text(
                 "Choose a user to broadcast to:",
@@ -1116,14 +1294,24 @@ async def config_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if cmd_name in all_cmd_names:
             valid_pinned.append(cmd_name)
             buttons.append([
-                InlineKeyboardButton(f"/{cmd_name}", callback_data=f"cfgview_{cmd_name}"),
-                InlineKeyboardButton("❌", callback_data=f"cfgremove_{cmd_name}"),
+                styled_button(
+                    f"/{cmd_name}",
+                    style="success",
+                    callback_data=f"cfgview_{cmd_name}",
+                ),
+                styled_button(
+                    "❌",
+                    style="danger",
+                    callback_data=f"cfgremove_{cmd_name}",
+                ),
             ])
 
     unpinned = [c["command_name"] for c in all_cmds if c["command_name"] not in valid_pinned]
     if unpinned:
-        buttons.append([InlineKeyboardButton("➕ Add to Menu", callback_data="cfgadd_list")])
-    buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
+        buttons.append([
+            styled_button("➕ Add to Menu", style="success", callback_data="cfgadd_list")
+        ])
+    buttons.append([styled_button("✖ Close", style="danger", callback_data="close_panel")])
 
     status = (
         "Pinned commands appear in your main menu. Tap ❌ to remove."
@@ -1131,7 +1319,7 @@ async def config_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You have no custom commands yet. Use 'Create Command' to add one."
     )
     try:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             f"⚙️ <b>Configure Main Menu</b>\n\n{status}",
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="HTML"
@@ -1153,8 +1341,10 @@ async def config_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         if not unpinned:
             await query.answer("All commands are already in the menu.", show_alert=True)
             return
-        buttons = [[InlineKeyboardButton(f"/{n}", callback_data=f"cfgpin_{n}")] for n in unpinned]
-        buttons.append([InlineKeyboardButton("« Back", callback_data="cfgback")])
+        buttons = [[
+            styled_button(f"/{n}", style="success", callback_data=f"cfgpin_{n}")
+        ] for n in unpinned]
+        buttons.append([styled_button("« Back", style="danger", callback_data="cfgback")])
         try:
             await query.edit_message_text("Choose a command to add:", reply_markup=InlineKeyboardMarkup(buttons))
         except Exception as e:
@@ -1194,13 +1384,23 @@ async def _refresh_config_menu(query, user):
         if cmd_name in all_cmd_names:
             valid_pinned.append(cmd_name)
             buttons.append([
-                InlineKeyboardButton(f"/{cmd_name}", callback_data=f"cfgview_{cmd_name}"),
-                InlineKeyboardButton("❌", callback_data=f"cfgremove_{cmd_name}"),
+                styled_button(
+                    f"/{cmd_name}",
+                    style="success",
+                    callback_data=f"cfgview_{cmd_name}",
+                ),
+                styled_button(
+                    "❌",
+                    style="danger",
+                    callback_data=f"cfgremove_{cmd_name}",
+                ),
             ])
     unpinned = [c["command_name"] for c in all_cmds if c["command_name"] not in valid_pinned]
     if unpinned:
-        buttons.append([InlineKeyboardButton("➕ Add to Menu", callback_data="cfgadd_list")])
-    buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
+        buttons.append([
+            styled_button("➕ Add to Menu", style="success", callback_data="cfgadd_list")
+        ])
+    buttons.append([styled_button("✖ Close", style="danger", callback_data="close_panel")])
     status = "Pinned commands appear in your main menu." if all_cmds else "You have no custom commands yet."
     try:
         await query.edit_message_text(
@@ -1268,11 +1468,12 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         status  = "✅ ON" if new_val else "❌ OFF"
         toggle_label = "Turn OFF" if new_val else "Turn ON"
         buttons = [
-            [InlineKeyboardButton(
+            [styled_button(
                 f"User Command Creation: {status}  →  {toggle_label}",
+                style="primary",
                 callback_data="toggle_user_create"
             )],
-            [InlineKeyboardButton("✖ Close", callback_data="close_panel")],
+            [styled_button("✖ Close", style="danger", callback_data="close_panel")],
         ]
         try:
             await query.edit_message_text(
@@ -1296,10 +1497,26 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             await query.answer("Command not found.", show_alert=True)
             return
         buttons = [
-            [InlineKeyboardButton("▶ Run Command", callback_data=f"viewcmd_{cmd_name}")],
-            [InlineKeyboardButton("✏️ Edit Messages", callback_data=f"editcmd_{cmd_name}")],
-            [InlineKeyboardButton("🗑 Delete Command", callback_data=f"delcmd_{cmd_name}")],
-            [InlineKeyboardButton("« Back to List", callback_data="back_to_list")],
+            [styled_button(
+                "▶ Run Command",
+                style="success",
+                callback_data=f"viewcmd_{cmd_name}",
+            )],
+            [styled_button(
+                "✏️ Edit Messages",
+                style="primary",
+                callback_data=f"editcmd_{cmd_name}",
+            )],
+            [styled_button(
+                "🗑 Delete Command",
+                style="danger",
+                callback_data=f"delcmd_{cmd_name}",
+            )],
+            [styled_button(
+                "« Back to List",
+                style="danger",
+                callback_data="back_to_list",
+            )],
         ]
         try:
             await query.edit_message_text(
@@ -1319,10 +1536,14 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 pass
             return
         buttons = [
-            [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"mycmd_{c['command_name']}")]
+            [styled_button(
+                f"/{c['command_name']}",
+                style="success",
+                callback_data=f"mycmd_{c['command_name']}",
+            )]
             for c in cmds
         ]
-        buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
+        buttons.append([styled_button("✖ Close", style="danger", callback_data="close_panel")])
         label = "👑 Your Global Commands:" if user.id == OWNER_ID else "Your Commands:"
         try:
             await query.edit_message_text(label, reply_markup=InlineKeyboardMarkup(buttons))
@@ -1355,13 +1576,27 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         for i, m in enumerate(msgs):
             preview = m.get("content", "")[:50] if m.get("type") == "text" else f"[{m.get('type')}]"
             lines.append(f"{i + 1}. {preview}")
-            buttons.append([InlineKeyboardButton(
-                f"🗑 Delete msg {i + 1}", callback_data=f"delmsg_{cmd_name}_{i}"
+            buttons.append([styled_button(
+                f"🗑 Delete msg {i + 1}",
+                style="danger",
+                callback_data=f"delmsg_{cmd_name}_{i}",
             )])
         buttons += [
-            [InlineKeyboardButton("➕ Add Messages", callback_data=f"addmsg_{cmd_name}")],
-            [InlineKeyboardButton("🗑 Delete All",   callback_data=f"delmsgall_{cmd_name}")],
-            [InlineKeyboardButton("« Back",          callback_data=f"mycmd_{cmd_name}")],
+            [styled_button(
+                "➕ Add Messages",
+                style="success",
+                callback_data=f"addmsg_{cmd_name}",
+            )],
+            [styled_button(
+                "🗑 Delete All",
+                style="danger",
+                callback_data=f"delmsgall_{cmd_name}",
+            )],
+            [styled_button(
+                "« Back",
+                style="danger",
+                callback_data=f"mycmd_{cmd_name}",
+            )],
         ]
         body = "\n".join(lines) if lines else "No messages yet."
         try:
@@ -1409,8 +1644,16 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     if data.startswith("delcmd_"):
         cmd_name = data[len("delcmd_"):]
         buttons  = [
-            [InlineKeyboardButton("✅ Yes, Delete", callback_data=f"confirmdelcmd_{cmd_name}")],
-            [InlineKeyboardButton("❌ Cancel",       callback_data=f"mycmd_{cmd_name}")],
+            [styled_button(
+                "✅ Yes, Delete",
+                style="danger",
+                callback_data=f"confirmdelcmd_{cmd_name}",
+            )],
+            [styled_button(
+                "❌ Cancel",
+                style="danger",
+                callback_data=f"mycmd_{cmd_name}",
+            )],
         ]
         try:
             await query.edit_message_text(
@@ -1433,10 +1676,14 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         cmds = await db.get_user_commands(user.id)
         if cmds:
             buttons = [
-                [InlineKeyboardButton(f"/{c['command_name']}", callback_data=f"mycmd_{c['command_name']}")]
+                [styled_button(
+                    f"/{c['command_name']}",
+                    style="success",
+                    callback_data=f"mycmd_{c['command_name']}",
+                )]
                 for c in cmds
             ]
-            buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
+            buttons.append([styled_button("✖ Close", style="danger", callback_data="close_panel")])
             try:
                 await context.bot.send_message(user.id, "Your Commands:",
                                                reply_markup=InlineKeyboardMarkup(buttons))
@@ -1458,15 +1705,16 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     buttons = [
-        [InlineKeyboardButton(
+        [styled_button(
             f"{u['creator_name']} — {u['count']} cmd{'s' if u['count'] != 1 else ''}",
+            style="primary",
             callback_data=f"adminuser_{u['_id']}"
         )]
         for u in users
     ]
-    buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
+    buttons.append([styled_button("✖ Close", style="danger", callback_data="close_panel")])
     try:
-        await update.message.reply_text(
+        await update.effective_message.reply_text(
             "👑 <b>Admin Panel</b>\n\nUsers with custom commands:",
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="HTML"
@@ -1490,11 +1738,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("No commands found.", show_alert=True)
             return
         buttons = [
-            [InlineKeyboardButton(f"/{c['command_name']}",
-                                  callback_data=f"admincmd_{target_id}_{c['command_name']}")]
+            [styled_button(
+                f"/{c['command_name']}",
+                style="success",
+                callback_data=f"admincmd_{target_id}_{c['command_name']}",
+            )]
             for c in cmds
         ]
-        buttons.append([InlineKeyboardButton("« Back", callback_data="admin_back")])
+        buttons.append([styled_button("« Back", style="danger", callback_data="admin_back")])
         try:
             await query.edit_message_text(
                 f"Commands by user {target_id}:",
@@ -1508,9 +1759,16 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = int(parts[1])
         cmd_name  = parts[2]
         buttons   = [
-            [InlineKeyboardButton("🗑 Delete This Command",
-                                  callback_data=f"admindelcmd_{target_id}_{cmd_name}")],
-            [InlineKeyboardButton("« Back", callback_data=f"adminuser_{target_id}")],
+            [styled_button(
+                "🗑 Delete This Command",
+                style="danger",
+                callback_data=f"admindelcmd_{target_id}_{cmd_name}",
+            )],
+            [styled_button(
+                "« Back",
+                style="danger",
+                callback_data=f"adminuser_{target_id}",
+            )],
         ]
         try:
             await query.edit_message_text(
@@ -1532,11 +1790,14 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await _admin_back_view(query)
         else:
             buttons = [
-                [InlineKeyboardButton(f"/{c['command_name']}",
-                                      callback_data=f"admincmd_{target_id}_{c['command_name']}")]
+                [styled_button(
+                    f"/{c['command_name']}",
+                    style="success",
+                    callback_data=f"admincmd_{target_id}_{c['command_name']}",
+                )]
                 for c in cmds
             ]
-            buttons.append([InlineKeyboardButton("« Back", callback_data="admin_back")])
+            buttons.append([styled_button("« Back", style="danger", callback_data="admin_back")])
             try:
                 await query.edit_message_text(
                     f"Commands by user {target_id}:",
@@ -1558,13 +1819,14 @@ async def _admin_back_view(query):
             pass
         return
     buttons = [
-        [InlineKeyboardButton(
+        [styled_button(
             f"{u['creator_name']} — {u['count']} cmd{'s' if u['count'] != 1 else ''}",
+            style="primary",
             callback_data=f"adminuser_{u['_id']}"
         )]
         for u in users
     ]
-    buttons.append([InlineKeyboardButton("✖ Close", callback_data="close_panel")])
+    buttons.append([styled_button("✖ Close", style="danger", callback_data="close_panel")])
     try:
         await query.edit_message_text(
             "👑 Admin Panel — Users with custom commands:",
@@ -1574,11 +1836,109 @@ async def _admin_back_view(query):
         logger.error(e)
 
 
+# ─── STYLED MAIN-MENU CALLBACKS ──────────────────────────────────────────────
+
+async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle the colored inline buttons used by the main menu."""
+    query = update.callback_query
+    user = query.from_user
+    data = query.data
+
+    if data == "menu_back":
+        await query.answer()
+        context.user_data.pop("submenu", None)
+        try:
+            await query.edit_message_text(
+                "Choose an option from the menu below:",
+                reply_markup=await build_main_menu(user.id),
+            )
+        except Exception as e:
+            logger.error(e)
+        return
+
+    if data == "menu_owner_commands":
+        global_cmds = await db.get_all_global_commands(OWNER_ID)
+        if not global_cmds:
+            await query.answer("No global commands have been created yet.", show_alert=True)
+            return
+        await query.answer()
+        context.user_data["submenu"] = "owner_cmds"
+        try:
+            await query.edit_message_text(
+                "👑 Bot Owner Commands — tap to run:",
+                reply_markup=await build_owner_cmds_keyboard(),
+            )
+        except Exception as e:
+            logger.error(e)
+        return
+
+    if data == "menu_user_commands":
+        cmds = await db.get_user_commands(user.id)
+        if not cmds:
+            await query.answer("You have no commands yet.", show_alert=True)
+            return
+        await query.answer()
+        context.user_data["submenu"] = "user_cmds"
+        try:
+            await query.edit_message_text(
+                "🗂 Your Commands — tap to run:",
+                reply_markup=await build_user_cmds_keyboard(user.id),
+            )
+        except Exception as e:
+            logger.error(e)
+        return
+
+    # The existing handlers are deliberately reused so all original
+    # permission checks, database calls, and conversation transitions remain
+    # unchanged.
+    actions = {
+        "menu_create": create_command_start,
+        "menu_admin": admin_panel,
+        "menu_my_commands": show_my_commands_list,
+        "menu_settings": owner_settings,
+        "menu_userlist": cmd_userlist,
+        "menu_grouplist": cmd_grouplist,
+        "menu_broadcast": broadcast_start,
+        "menu_stats": cmd_stats,
+        "menu_config": config_main_menu,
+    }
+    handler = actions.get(data)
+    if handler is not None:
+        await query.answer()
+        return await handler(update, context)
+
+
+async def styled_command_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Run a command selected from a colored owner/user command button."""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data.startswith("run_global_"):
+        cmd_name = data[len("run_global_"):].lower()
+    else:
+        cmd_name = data[len("run_user_"):].lower()
+
+    await _run_command_for_chat(
+        context.bot,
+        context,
+        query.message.chat_id,
+        query.from_user.id,
+        cmd_name,
+    )
+
+
 # ─── COMBINED CALLBACK ROUTER ─────────────────────────────────────────────────
 
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data  = query.data
+
+    if data.startswith("menu_"):
+        return await main_menu_callback(update, context)
+
+    if data.startswith("run_global_") or data.startswith("run_user_"):
+        return await styled_command_callback(update, context)
 
     # Pagination
     if data.startswith("pg|") or data in ("pg_noop", "pg_close"):
@@ -1640,14 +2000,20 @@ def build_handlers():
         entry_points=[
             MessageHandler(filters.Regex("^Create Command$"), create_command_start),
             CommandHandler("createcommand", create_command_start),
+            CallbackQueryHandler(create_command_start, pattern=r"^menu_create$"),
         ],
         states={
             WAIT_CMD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, received_cmd_name)],
-            WAIT_MESSAGES: [MessageHandler(~filters.COMMAND, collect_messages)],
+            WAIT_MESSAGES: [
+                CallbackQueryHandler(save_create_callback, pattern=r"^conv_save$"),
+                CallbackQueryHandler(cancel_conv_callback, pattern=r"^conv_cancel$"),
+                MessageHandler(~filters.COMMAND, collect_messages),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel_conv),
             MessageHandler(filters.Regex("^Cancel$"), cancel_conv),
+            CallbackQueryHandler(cancel_conv_callback, pattern=r"^conv_cancel$"),
         ],
         allow_reentry=True,
     )
@@ -1656,6 +2022,7 @@ def build_handlers():
         entry_points=[
             MessageHandler(filters.Regex(r"^/broadcast$"), broadcast_start),
             CommandHandler("broadcast", broadcast_start),
+            CallbackQueryHandler(broadcast_start, pattern=r"^menu_broadcast$"),
         ],
         states={
             BROADCAST_TARGET: [CallbackQueryHandler(broadcast_target_callback)],
