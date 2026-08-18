@@ -57,18 +57,32 @@ def styled_button(text: str, *, style: str = "primary", callback_data: str = Non
     return InlineKeyboardButton(**kwargs)
 
 
-def create_prompt_keyboard(*, include_save: bool = False):
-    """Inline controls for the create-command conversation.
+def styled_reply_button(text: str, *, style: str = "primary"):
+    """Create a styled Telegram reply-keyboard button.
 
-    Reply keyboards cannot carry Telegram's per-button styles. These controls
-    are therefore inline, while the original text commands (Save/Cancel) are
-    still accepted by the conversation handlers for backwards compatibility.
+    The Bot API added ``style`` to KeyboardButton before the pinned
+    python-telegram-bot release exposed it as a first-class argument. Passing
+    it through ``api_kwargs`` keeps this bot compatible with PTB 21.3.
     """
+    return KeyboardButton(text=text, api_kwargs={"style": style})
+
+
+def reply_keyboard(rows):
+    """Build a persistent, styled reply keyboard from button rows."""
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
+
+
+def _button_rows(buttons, columns=3):
+    return [buttons[i:i + columns] for i in range(0, len(buttons), columns)]
+
+
+def create_prompt_keyboard(*, include_save: bool = False):
+    """Reply controls for the create-command conversation."""
     rows = []
     if include_save:
-        rows.append([styled_button("Save", style="success", callback_data="conv_save")])
-    rows.append([styled_button("Cancel", style="danger", callback_data="conv_cancel")])
-    return InlineKeyboardMarkup(rows)
+        rows.append([styled_reply_button("Save", style="success")])
+    rows.append([styled_reply_button("Cancel", style="danger")])
+    return reply_keyboard(rows)
 
 
 # ─── MENUS ────────────────────────────────────────────────────────────────────
@@ -79,103 +93,157 @@ async def build_main_menu(user_id: int):
 
     if user_id == OWNER_ID:
         rows.append([
-            styled_button("Create Command", style="success", callback_data="menu_create"),
-            styled_button("Admin Panel", style="primary", callback_data="menu_admin"),
+            styled_reply_button("Create Command", style="primary"),
+            styled_reply_button("Admin Panel", style="primary"),
         ])
         rows.append([
-            styled_button("My Commands", style="primary", callback_data="menu_my_commands"),
-            styled_button("⚙️ Settings", style="primary", callback_data="menu_settings"),
+            styled_reply_button("My Commands", style="primary"),
+            styled_reply_button("⚙️ Settings", style="primary"),
         ])
         rows.append([
-            styled_button("/userlist", style="success", callback_data="menu_userlist"),
-            styled_button("/grouplist", style="success", callback_data="menu_grouplist"),
-            styled_button("/broadcast", style="success", callback_data="menu_broadcast"),
+            styled_reply_button("/userlist", style="primary"),
+            styled_reply_button("/grouplist", style="primary"),
+            styled_reply_button("/broadcast", style="primary"),
         ])
-        rows.append([styled_button("/stats", style="success", callback_data="menu_stats")])
+        rows.append([styled_reply_button("/stats", style="primary")])
         if global_cmds:
             rows.append([
-                styled_button(
+                styled_reply_button(
                     HEADER_OWNER,
                     style="primary",
-                    callback_data="menu_owner_commands",
                 )
             ])
     else:
         rows.append([
-            styled_button("Create Command", style="success", callback_data="menu_create"),
-            styled_button("Config. Main Menu", style="primary", callback_data="menu_config"),
+            styled_reply_button("Create Command", style="primary"),
+            styled_reply_button("Config. Main Menu", style="primary"),
         ])
         if global_cmds:
             rows.append([
-                styled_button(
+                styled_reply_button(
                     HEADER_OWNER,
                     style="primary",
-                    callback_data="menu_owner_commands",
                 )
             ])
         user_cmds = await db.get_user_commands(user_id)
         if user_cmds:
             rows.append([
-                styled_button(
+                styled_reply_button(
                     HEADER_USER,
                     style="primary",
-                    callback_data="menu_user_commands",
                 )
             ])
 
-    return InlineKeyboardMarkup(rows)
+    return reply_keyboard(rows)
 
 
 async def build_owner_cmds_keyboard():
-    """Keyboard shown when ═══ Bot Owner Commands ═══ is tapped."""
+    """Reply keyboard shown when the owner-command section is opened."""
     global_cmds = await db.get_all_global_commands(OWNER_ID)
     rows = []
     if global_cmds:
         btns = [
-            styled_button(
+            styled_reply_button(
                 f"{OWNER_BADGE}/{c['command_name']}",
                 style="success",
-                callback_data=f"run_global_{c['command_name']}",
             )
             for c in global_cmds
         ]
         for i in range(0, len(btns), 3):
             rows.append(btns[i:i + 3])
-    rows.append([styled_button(BTN_BACK, style="danger", callback_data="menu_back")])
-    return InlineKeyboardMarkup(rows)
+    rows.append([styled_reply_button(BTN_BACK, style="danger")])
+    return reply_keyboard(rows)
 
 
 async def build_user_cmds_keyboard(user_id: int):
-    """Keyboard shown when ═══ Your Commands ═══ is tapped."""
+    """Reply keyboard shown when the user's command section is opened."""
     cmds = await db.get_user_commands(user_id)
     rows = []
     if cmds:
         btns = [
-            styled_button(
+            styled_reply_button(
                 f"/{c['command_name']}",
                 style="success",
-                callback_data=f"run_user_{c['command_name']}",
             )
             for c in cmds
         ]
         for i in range(0, len(btns), 3):
             rows.append(btns[i:i + 3])
     rows.append([
-        styled_button(
+        styled_reply_button(
             "✏️ Manage Commands",
             style="primary",
-            callback_data="menu_my_commands",
         ),
-        styled_button(BTN_BACK, style="danger", callback_data="menu_back"),
+        styled_reply_button(BTN_BACK, style="danger"),
     ])
-    return InlineKeyboardMarkup(rows)
+    return reply_keyboard(rows)
+
+
+async def build_my_commands_keyboard(user_id: int):
+    cmds = await db.get_user_commands(user_id)
+    buttons = [
+        styled_reply_button(f"/{c['command_name']}", style="success")
+        for c in cmds
+    ]
+    rows = _button_rows(buttons)
+    rows.append([styled_reply_button(BTN_BACK, style="danger")])
+    return reply_keyboard(rows)
+
+
+async def build_settings_keyboard():
+    allowed = await db.get_setting("user_create_enabled", True)
+    status = "✅ ON" if allowed else "❌ OFF"
+    toggle_label = "Turn OFF" if allowed else "Turn ON"
+    return reply_keyboard([
+        [styled_reply_button(
+            f"User Command Creation: {status}  →  {toggle_label}",
+            style="primary",
+        )],
+        [styled_reply_button(BTN_BACK, style="danger")],
+    ])
+
+
+async def build_admin_users_keyboard():
+    users = await db.get_all_users_with_commands(OWNER_ID)
+    labels = {}
+    buttons = []
+    for item in users:
+        label = f"{item['creator_name']} — {item['count']} cmd{'s' if item['count'] != 1 else ''}"
+        labels[label] = item["_id"]
+        buttons.append(styled_reply_button(label, style="success"))
+    return reply_keyboard(_button_rows(buttons) + [
+        [styled_reply_button(BTN_BACK, style="danger")]
+    ]), labels
+
+
+async def build_admin_commands_keyboard(target_id: int):
+    cmds = await db.get_user_commands(target_id)
+    buttons = [
+        styled_reply_button(f"/{c['command_name']}", style="success")
+        for c in cmds
+    ]
+    return reply_keyboard(_button_rows(buttons) + [
+        [styled_reply_button(BTN_BACK, style="danger")]
+    ])
+
+
+def build_admin_detail_keyboard():
+    return reply_keyboard([
+        [styled_reply_button("Delete This Command", style="danger")],
+        [styled_reply_button(BTN_BACK, style="danger")],
+    ])
 
 
 async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str = None):
     user = update.effective_user
     context.user_data.pop("submenu", None)
     # Clear management state
-    for k in ("mgmt_mode", "mgmt_cmd", "mgmt_owner_id", "mgmt_new_msgs"):
+    for k in (
+        "mgmt_mode", "mgmt_cmd", "mgmt_owner_id", "mgmt_new_msgs",
+        "admin_mode", "admin_target_id", "admin_cmd_name",
+        "bc_target", "bc_user_labels", "pg_page", "pg_creator",
+        "pg_cmd",
+    ):
         context.user_data.pop(k, None)
     markup = await build_main_menu(user.id)
     msg = text or "Use the menu below to manage and trigger commands."
@@ -188,40 +256,45 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
 # ─── KEYBOARD-BASED COMMAND MANAGEMENT ────────────────────────────────────────
 
 def _mgmt_detail_keyboard():
-    return ReplyKeyboardMarkup([
-        ["View Command"],
-        ["Edit Messages"],
-        ["Configure Menu"],
-        ["Delete Command"],
-    ], resize_keyboard=True)
+    return reply_keyboard([
+        [styled_reply_button("View Command", style="primary")],
+        [styled_reply_button("Edit Messages", style="primary")],
+        [styled_reply_button("Configure Menu", style="primary")],
+        [styled_reply_button("Delete Command", style="primary")],
+        [styled_reply_button(BTN_BACK, style="danger")],
+    ])
 
 
 def _mgmt_edit_keyboard():
-    return ReplyKeyboardMarkup([
-        ["Add Messages to Command"],
-        ["Delete All Messages"],
-        ["Go Back"],
-    ], resize_keyboard=True)
+    return reply_keyboard([
+        [styled_reply_button("Add Messages to Command", style="primary")],
+        [styled_reply_button("Delete All Messages", style="primary")],
+        [styled_reply_button(BTN_BACK, style="danger")],
+    ])
 
 
 def _mgmt_add_keyboard():
-    return ReplyKeyboardMarkup([
-        ["Add Question"],
-        ["Enable Random-message Mode"],
-        ["Save"],
-    ], resize_keyboard=True)
+    return reply_keyboard([
+        [styled_reply_button("Add Question", style="primary")],
+        [styled_reply_button("Enable Random-message Mode", style="primary")],
+        [styled_reply_button("Save", style="success")],
+        [styled_reply_button("Cancel", style="danger")],
+    ])
 
 
 def _mgmt_del_keyboard():
-    return ReplyKeyboardMarkup([["Yes"], ["Cancel"]], resize_keyboard=True)
+    return reply_keyboard([
+        [styled_reply_button("Confirm", style="success")],
+        [styled_reply_button("Cancel", style="danger")],
+    ])
 
 
 async def _mgmt_cfg_keyboard(user_id: int):
     items = await db.get_user_menu_items(user_id)
-    rows  = [[item] for item in items] if items else []
-    rows.append(["✦ Add Menu Item ✦"])
-    rows.append(["Go Back"])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    rows  = [[styled_reply_button(f"/{item}", style="primary")] for item in items] if items else []
+    rows.append([styled_reply_button("✦ Add Menu Item ✦", style="primary")])
+    rows.append([styled_reply_button(BTN_BACK, style="danger")])
+    return reply_keyboard(rows)
 
 
 def _mgmt_set(context, mode, cmd_name=None, owner_id=None):
@@ -244,28 +317,17 @@ def _mgmt_clear(context):
 
 
 async def show_my_commands_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show user/owner commands as styled inline buttons for selection."""
+    """Show user/owner commands as reply buttons for selection."""
     user = update.effective_user
     cmds = await db.get_user_commands(user.id)
     if not cmds:
         await send_main_menu(update, context, "You have no commands yet.")
         return
     _mgmt_set(context, "select_cmd", owner_id=user.id)
-    rows = [
-        [
-            styled_button(
-                f"/{c['command_name']}",
-                style="success",
-                callback_data=f"mycmd_{c['command_name']}",
-            )
-        ]
-        for c in cmds
-    ]
-    rows.append([styled_button("◀ Back", style="danger", callback_data="menu_back")])
-    markup = InlineKeyboardMarkup(rows)
     label  = "👑 Your Global Commands:" if user.id == OWNER_ID else "Your Commands:"
     await update.effective_message.reply_text(
-        f"{label}\nTap a command to manage it.", reply_markup=markup
+        f"{label}\nTap a command to manage it.",
+        reply_markup=await build_my_commands_keyboard(user.id),
     )
 
 
@@ -378,25 +440,15 @@ async def _send_command_messages(bot, chat_id: int, messages: list):
 def _build_page_keyboard(creator_id: int, cmd_name: str, page: int, total_pages: int):
     nav = []
     if page > 0:
-        nav.append(styled_button(
-            "◀ Prev",
-            style="primary",
-            callback_data=f"pg|{page-1}|{creator_id}|{cmd_name}",
-        ))
-    nav.append(styled_button(
-        f"📄 {page+1}/{total_pages}",
-        style="primary",
-        callback_data="pg_noop",
+        nav.append(styled_reply_button("◀ Prev", style="primary"))
+    nav.append(styled_reply_button(
+        f"📄 {page+1}/{total_pages}", style="primary"
     ))
     if page < total_pages - 1:
-        nav.append(styled_button(
-            "Next ▶",
-            style="primary",
-            callback_data=f"pg|{page+1}|{creator_id}|{cmd_name}",
-        ))
-    return InlineKeyboardMarkup([
+        nav.append(styled_reply_button("Next ▶", style="primary"))
+    return reply_keyboard([
         nav,
-        [styled_button("✖ Close", style="danger", callback_data="pg_close")],
+        [styled_reply_button("✖ Close", style="danger")],
     ])
 
 
@@ -428,19 +480,19 @@ async def _deliver_page(bot, context, chat_id: int, doc: dict, page: int,
             sent_ids.append(sent.message_id)
     context.user_data["pg_msgs"] = sent_ids
     context.user_data["pg_chat"] = chat_id
+    context.user_data["pg_page"] = page
+    context.user_data["pg_creator"] = creator_id
+    context.user_data["pg_cmd"] = cmd_name
 
     markup = _build_page_keyboard(creator_id, cmd_name, page, total_pages)
 
-    # Edit the existing control message if we have it, otherwise send a new one
+    # Reply keyboards cannot be edited in-place reliably. Remove the old
+    # control message and send a fresh one for the new page.
     if ctrl_message_id:
         try:
-            await bot.edit_message_reply_markup(
-                chat_id=chat_id, message_id=ctrl_message_id, reply_markup=markup
-            )
-            context.user_data["pg_ctrl"] = ctrl_message_id
-            return
+            await bot.delete_message(chat_id, ctrl_message_id)
         except Exception:
-            pass  # fall through to send new
+            pass
 
     ctrl = await bot.send_message(
         chat_id,
@@ -449,6 +501,52 @@ async def _deliver_page(bot, context, chat_id: int, doc: dict, page: int,
         parse_mode="HTML"
     )
     context.user_data["pg_ctrl"] = ctrl.message_id
+
+
+async def _close_pagination(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    for mid in context.user_data.get("pg_msgs", []):
+        try:
+            await context.bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+    ctrl_id = context.user_data.get("pg_ctrl")
+    if ctrl_id:
+        try:
+            await context.bot.delete_message(chat_id, ctrl_id)
+        except Exception:
+            pass
+    for key in ("pg_msgs", "pg_ctrl", "pg_chat", "pg_page", "pg_creator", "pg_cmd"):
+        context.user_data.pop(key, None)
+
+
+async def pagination_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip() if update.message and update.message.text else ""
+    if text == "✖ Close":
+        await _close_pagination(update, context)
+        return await send_main_menu(update, context)
+    if text not in ("◀ Prev", "Next ▶"):
+        return False
+
+    creator_id = context.user_data.get("pg_creator")
+    cmd_name = context.user_data.get("pg_cmd")
+    page = context.user_data.get("pg_page", 0)
+    if creator_id is None or not cmd_name:
+        return False
+    doc = await db.get_command(creator_id, cmd_name)
+    if not doc:
+        doc = await db.get_global_command(creator_id, cmd_name)
+    if not doc:
+        await _close_pagination(update, context)
+        return await send_main_menu(update, context, "Command not found.")
+    page += -1 if text == "◀ Prev" else 1
+    total_pages = (len(doc.get("messages", [])) + PAGE_SIZE - 1) // PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    await _deliver_page(
+        context.bot, context, update.effective_chat.id, doc, page,
+        ctrl_message_id=context.user_data.get("pg_ctrl"),
+    )
+    return True
 
 
 async def pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -595,8 +693,80 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Keyboard-based management mode routing ────────────────────────────────
     mgmt_mode, mgmt_cmd, mgmt_owner_id = _mgmt_get(context)
 
+    # ── Pagination controls ───────────────────────────────────────────────────
+    if context.user_data.get("pg_ctrl"):
+        handled = await pagination_text(update, context)
+        if handled:
+            return
+
+    # ── Owner settings and admin panel ────────────────────────────────────────
+    admin_mode = context.user_data.get("admin_mode")
+    if admin_mode == "settings":
+        if text == BTN_BACK:
+            context.user_data.pop("admin_mode", None)
+            return await send_main_menu(update, context)
+        if text and text.startswith("User Command Creation:"):
+            current = await db.get_setting("user_create_enabled", True)
+            await db.set_setting("user_create_enabled", not current)
+            return await owner_settings(update, context)
+        return
+
+    if admin_mode == "users":
+        if text == BTN_BACK:
+            context.user_data.pop("admin_mode", None)
+            return await send_main_menu(update, context)
+        target_id = context.user_data.get("admin_user_labels", {}).get(text)
+        if target_id is not None:
+            context.user_data["admin_target_id"] = target_id
+            context.user_data["admin_mode"] = "commands"
+            cmds = await db.get_user_commands(target_id)
+            if not cmds:
+                return await _admin_back_message(update, context)
+            await message.reply_text(
+                f"Commands by user {target_id}:",
+                reply_markup=await build_admin_commands_keyboard(target_id),
+            )
+        return
+
+    if admin_mode == "commands":
+        target_id = context.user_data.get("admin_target_id")
+        if text == BTN_BACK:
+            return await admin_panel(update, context)
+        if text and text.startswith("/") and target_id is not None:
+            cmd_name = text[1:].split("@")[0].lower()
+            doc = await db.get_command(target_id, cmd_name)
+            if doc:
+                context.user_data["admin_cmd_name"] = cmd_name
+                context.user_data["admin_mode"] = "detail"
+                await message.reply_text(
+                    f"Command /{cmd_name} by user {target_id}:",
+                    reply_markup=build_admin_detail_keyboard(),
+                )
+            return
+        return
+
+    if admin_mode == "detail":
+        target_id = context.user_data.get("admin_target_id")
+        cmd_name = context.user_data.get("admin_cmd_name")
+        if text == BTN_BACK:
+            context.user_data["admin_mode"] = "commands"
+            return await message.reply_text(
+                f"Commands by user {target_id}:",
+                reply_markup=await build_admin_commands_keyboard(target_id),
+            )
+        if text == "Delete This Command" and target_id and cmd_name:
+            await db.delete_command(target_id, cmd_name)
+            await db.remove_from_user_menu(target_id, cmd_name)
+            context.user_data["admin_mode"] = "commands"
+            await message.reply_text(f"✅ /{cmd_name} deleted.")
+            return await message.reply_text(
+                f"Commands by user {target_id}:",
+                reply_markup=await build_admin_commands_keyboard(target_id),
+            )
+        return
+
     if mgmt_mode == "select_cmd":
-        if text == "Go Back":
+        if text == BTN_BACK:
             _mgmt_clear(context)
             return await send_main_menu(update, context)
         if text:
@@ -641,7 +811,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await send_main_menu(update, context)
 
     if mgmt_mode == "edit_msgs":
-        if text == "Go Back":
+        if text == BTN_BACK:
             return await _show_mgmt_detail(update, context, mgmt_cmd, mgmt_owner_id)
         if text == "Add Messages to Command":
             _mgmt_set(context, "add_msgs")
@@ -695,7 +865,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if mgmt_mode == "del_confirm":
-        if text == "Yes":
+        if text == "Confirm":
             await db.delete_command(mgmt_owner_id, mgmt_cmd)
             await db.remove_from_user_menu(mgmt_owner_id, mgmt_cmd)
             _mgmt_clear(context)
@@ -705,7 +875,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await _show_mgmt_detail(update, context, mgmt_cmd, mgmt_owner_id)
 
     if mgmt_mode == "cfg_menu":
-        if text == "Go Back":
+        if text == BTN_BACK:
             return await _show_mgmt_detail(update, context, mgmt_cmd, mgmt_owner_id)
         if text == "✦ Add Menu Item ✦":
             pinned   = await db.get_user_menu_items(user.id)
@@ -715,11 +885,12 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await message.reply_text("All your commands are already in the menu.")
                 return
             _mgmt_set(context, "cfg_add_item")
-            rows = [[f"/{c['command_name']}"] for c in unpinned]
-            rows.append(["Go Back"])
+            rows = [[styled_reply_button(f"/{c['command_name']}", style="primary")]
+                    for c in unpinned]
+            rows.append([styled_reply_button(BTN_BACK, style="danger")])
             await message.reply_text(
                 "Choose a command to add to your menu:",
-                reply_markup=ReplyKeyboardMarkup(rows, resize_keyboard=True)
+                reply_markup=reply_keyboard(rows)
             )
             return
         # Tap on an existing pinned item → remove it
@@ -733,7 +904,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if mgmt_mode == "cfg_add_item":
-        if text == "Go Back":
+        if text == BTN_BACK:
             return await _show_mgmt_cfg(update, context)
         if text and text.startswith("/"):
             cmd_n = text[1:].lower()
@@ -1023,23 +1194,16 @@ def _extract_message_data(message):
 async def owner_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != OWNER_ID:
         return
+    context.user_data["admin_mode"] = "settings"
     allowed = await db.get_setting("user_create_enabled", True)
     status  = "✅ ON" if allowed else "❌ OFF"
     toggle_label = "Turn OFF" if allowed else "Turn ON"
-    buttons = [
-        [styled_button(
-            f"User Command Creation: {status}  →  {toggle_label}",
-            style="primary",
-            callback_data="toggle_user_create"
-        )],
-        [styled_button("✖ Close", style="danger", callback_data="close_panel")],
-    ]
     try:
         await update.effective_message.reply_text(
             "⚙️ <b>Bot Settings</b>\n\n"
             f"<b>User Command Creation:</b> {status}\n\n"
             "When OFF, regular users cannot create new commands.",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=await build_settings_keyboard(),
             parse_mode="HTML"
         )
     except Exception as e:
@@ -1134,23 +1298,14 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
         await update.callback_query.answer()
     user_count = await db.get_user_count()
-    buttons = [
-        [styled_button(
-            f"📢 All Users ({user_count})",
-            style="success",
-            callback_data="bc_all",
-        )],
-        [styled_button(
-            "👤 Specific User",
-            style="primary",
-            callback_data="bc_choose",
-        )],
-        [styled_button("❌ Cancel", style="danger", callback_data="bc_cancel")],
-    ]
     try:
         await update.effective_message.reply_text(
             "📢 <b>Broadcast</b>\n\nSend to all users, or pick a specific user:",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=reply_keyboard([
+                [styled_reply_button(f"📢 All Users ({user_count})", style="success")],
+                [styled_reply_button("👤 Specific User", style="primary")],
+                [styled_reply_button("❌ Cancel", style="danger")],
+            ]),
             parse_mode="HTML"
         )
     except Exception as e:
@@ -1159,6 +1314,44 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def broadcast_target_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message:
+        user = update.effective_user
+        if user.id != OWNER_ID:
+            return ConversationHandler.END
+        text = update.message.text.strip() if update.message.text else ""
+        if text in ("❌ Cancel", "/cancel"):
+            await send_main_menu(update, context, "Broadcast cancelled.")
+            return ConversationHandler.END
+        if text.startswith("📢 All Users"):
+            context.user_data["bc_target"] = "all"
+            await update.message.reply_text(
+                "📢 Send the message now. /cancel to abort."
+            )
+            return BROADCAST_MSG
+        if text == "👤 Specific User":
+            users = await db.get_all_users()
+            labels = {}
+            buttons = []
+            for u in users[:50]:
+                label = f"{u['name']} ({u['user_id']})"
+                labels[label] = u["user_id"]
+                buttons.append(styled_reply_button(label, style="primary"))
+            context.user_data["bc_user_labels"] = labels
+            buttons.append(styled_reply_button("❌ Cancel", style="danger"))
+            await update.message.reply_text(
+                "Choose a user to broadcast to:",
+                reply_markup=reply_keyboard(_button_rows(buttons)),
+            )
+            return BROADCAST_TARGET
+        target = context.user_data.get("bc_user_labels", {}).get(text)
+        if target:
+            context.user_data["bc_target"] = target
+            await update.message.reply_text(
+                f"📩 Send message to user {target}. /cancel to abort."
+            )
+            return BROADCAST_MSG
+        return BROADCAST_TARGET
+
     query = update.callback_query
     await query.answer()
     user = query.from_user
@@ -1227,7 +1420,7 @@ async def broadcast_send_message(update: Update, context: ContextTypes.DEFAULT_T
     if user.id != OWNER_ID:
         return ConversationHandler.END
     message = update.message
-    if message.text and message.text.strip() == "/cancel":
+    if message.text and message.text.strip() in ("/cancel", "❌ Cancel"):
         await send_main_menu(update, context, "Broadcast cancelled.")
         return ConversationHandler.END
 
@@ -1283,49 +1476,7 @@ async def config_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if user.id == OWNER_ID:
         return
-
-    pinned       = await db.get_user_menu_items(user.id)
-    all_cmds     = await db.get_user_commands(user.id)
-    all_cmd_names = {c["command_name"] for c in all_cmds}
-
-    buttons       = []
-    valid_pinned  = []
-    for cmd_name in pinned:
-        if cmd_name in all_cmd_names:
-            valid_pinned.append(cmd_name)
-            buttons.append([
-                styled_button(
-                    f"/{cmd_name}",
-                    style="success",
-                    callback_data=f"cfgview_{cmd_name}",
-                ),
-                styled_button(
-                    "❌",
-                    style="danger",
-                    callback_data=f"cfgremove_{cmd_name}",
-                ),
-            ])
-
-    unpinned = [c["command_name"] for c in all_cmds if c["command_name"] not in valid_pinned]
-    if unpinned:
-        buttons.append([
-            styled_button("➕ Add to Menu", style="success", callback_data="cfgadd_list")
-        ])
-    buttons.append([styled_button("✖ Close", style="danger", callback_data="close_panel")])
-
-    status = (
-        "Pinned commands appear in your main menu. Tap ❌ to remove."
-        if all_cmds else
-        "You have no custom commands yet. Use 'Create Command' to add one."
-    )
-    try:
-        await update.effective_message.reply_text(
-            f"⚙️ <b>Configure Main Menu</b>\n\n{status}",
-            reply_markup=InlineKeyboardMarkup(buttons),
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logger.error(e)
+    return await _show_mgmt_cfg(update, context)
 
 
 async def config_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1704,19 +1855,13 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👑 <b>Admin Panel</b>\n\nNo users have created commands yet."
         )
         return
-    buttons = [
-        [styled_button(
-            f"{u['creator_name']} — {u['count']} cmd{'s' if u['count'] != 1 else ''}",
-            style="primary",
-            callback_data=f"adminuser_{u['_id']}"
-        )]
-        for u in users
-    ]
-    buttons.append([styled_button("✖ Close", style="danger", callback_data="close_panel")])
+    context.user_data["admin_mode"] = "users"
+    markup, labels = await build_admin_users_keyboard()
+    context.user_data["admin_user_labels"] = labels
     try:
         await update.effective_message.reply_text(
             "👑 <b>Admin Panel</b>\n\nUsers with custom commands:",
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=markup,
             parse_mode="HTML"
         )
     except Exception as e:
@@ -1834,6 +1979,17 @@ async def _admin_back_view(query):
         )
     except Exception as e:
         logger.error(e)
+
+
+async def _admin_back_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    markup, labels = await build_admin_users_keyboard()
+    context.user_data["admin_mode"] = "users"
+    context.user_data["admin_user_labels"] = labels
+    await update.message.reply_text(
+        "👑 <b>Admin Panel</b>\n\nUsers with custom commands:",
+        reply_markup=markup,
+        parse_mode="HTML",
+    )
 
 
 # ─── STYLED MAIN-MENU CALLBACKS ──────────────────────────────────────────────
@@ -2025,7 +2181,10 @@ def build_handlers():
             CallbackQueryHandler(broadcast_start, pattern=r"^menu_broadcast$"),
         ],
         states={
-            BROADCAST_TARGET: [CallbackQueryHandler(broadcast_target_callback)],
+            BROADCAST_TARGET: [
+                MessageHandler(filters.TEXT, broadcast_target_callback),
+                CallbackQueryHandler(broadcast_target_callback),
+            ],
             BROADCAST_MSG:    [MessageHandler(~filters.COMMAND, broadcast_send_message)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conv)],
