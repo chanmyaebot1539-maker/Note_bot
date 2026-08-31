@@ -1,6 +1,7 @@
 import os
 import re
 import logging
+from urllib.parse import urlparse
 from telegram import (
     Update, ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton,
     KeyboardButton
@@ -26,6 +27,35 @@ PAGE_SIZE   = 10   # messages per page when a command has many replies
 HEADER_OWNER = "═══ Bot Owner Commands ═══"
 HEADER_USER  = "═══ Your Commands ═══"
 BTN_BACK     = "◀ Back"
+WELCOME_BUTTONS_SETTING = "welcome_inline_buttons"
+WELCOME_BUTTONS_LABEL = "🔘 Welcome Inline Buttons"
+WELCOME_ADD_LABEL = "➕ Add Welcome Button"
+WELCOME_CANCEL = "Cancel"
+
+DEFAULT_WELCOME_BUTTONS = [
+    {
+        "id": "add_to_group",
+        "label": "➕ Add me to your chat!",
+        "kind": "add_to_group",
+        "style": "success",
+        "row": 0,
+    },
+    {
+        "id": "music_bot",
+        "label": "🎵 Music bot",
+        "kind": "url",
+        "url": "https://t.me/music100200bot?start=tg",
+        "style": "success",
+        "row": 1,
+    },
+    {
+        "id": "share_bot",
+        "label": "🔗 Share bot",
+        "kind": "share",
+        "style": "success",
+        "row": 1,
+    },
+]
 
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -199,8 +229,106 @@ async def build_settings_keyboard():
             f"User Command Creation: {status}  →  {toggle_label}",
             style="primary",
         )],
+        [styled_reply_button(WELCOME_BUTTONS_LABEL, style="primary")],
         [styled_reply_button(BTN_BACK, style="danger")],
     ])
+
+
+async def get_welcome_buttons():
+    stored = await db.get_setting(WELCOME_BUTTONS_SETTING)
+    if not isinstance(stored, list):
+        return [dict(button) for button in DEFAULT_WELCOME_BUTTONS]
+    return [
+        button for button in stored
+        if isinstance(button, dict) and button.get("id") and button.get("label")
+    ]
+
+
+async def save_welcome_buttons(buttons):
+    await db.set_setting(WELCOME_BUTTONS_SETTING, buttons)
+
+
+def _welcome_button_url(button, user, bot_username):
+    kind = button.get("kind")
+    if kind == "add_to_group":
+        return f"https://t.me/{bot_username}?startgroup=true"
+    if kind != "url":
+        return None
+    return (
+        str(button.get("url", ""))
+        .replace("{bot_username}", bot_username)
+        .replace("{user_id}", str(user.id))
+    )
+
+
+async def build_welcome_inline_markup(user, bot_username):
+    rows = []
+    buttons = await get_welcome_buttons()
+    for button in buttons:
+        kind = button.get("kind")
+        if kind == "share":
+            inline = styled_button(
+                button["label"],
+                style=button.get("style", "primary"),
+                callback_data=f"sharebot_{user.id}",
+            )
+        else:
+            url = _welcome_button_url(button, user, bot_username)
+            if not url or urlparse(url).scheme not in ("http", "https"):
+                continue
+            inline = styled_button(
+                button["label"],
+                style=button.get("style", "primary"),
+                url=url,
+            )
+
+        row_index = button.get("row", len(rows))
+        if not isinstance(row_index, int) or row_index < 0:
+            row_index = len(rows)
+        while len(rows) <= row_index:
+            rows.append([])
+        rows[row_index].append(inline)
+
+    visible_rows = [row for row in rows if row]
+    return InlineKeyboardMarkup(visible_rows) if visible_rows else None
+
+
+async def welcome_buttons_panel(update: Update, context: ContextTypes.DEFAULT_TYPE, notice=None):
+    if update.effective_user.id != OWNER_ID:
+        return
+
+    buttons = await get_welcome_buttons()
+    delete_labels = {}
+    rows = []
+    for button in buttons:
+        short_label = button["label"][:44]
+        if len(button["label"]) > 44:
+            short_label += "…"
+        label = f"🗑 Delete: {short_label}"
+        if label in delete_labels:
+            label = f"{label} ({button['id']})"[:64]
+        delete_labels[label] = button["id"]
+        rows.append([styled_reply_button(label, style="danger")])
+
+    rows.extend([
+        [styled_reply_button(WELCOME_ADD_LABEL, style="primary")],
+        [styled_reply_button(BTN_BACK, style="danger")],
+    ])
+    context.user_data["admin_mode"] = "welcome_buttons"
+    context.user_data["welcome_button_labels"] = delete_labels
+    summary = "\n".join(f"• {button['label']}" for button in buttons)
+    if not summary:
+        summary = "No welcome buttons configured."
+    body = (
+        "🔘 <b>Welcome Inline Buttons</b>\n\n"
+        "These buttons appear below the welcome message sent by /start.\n\n"
+        f"{summary}"
+    )
+    if notice:
+        body = f"{notice}\n\n{body}"
+    await update.effective_message.reply_text(
+        body, reply_markup=reply_keyboard(rows), parse_mode="HTML"
+    )
 
 
 async def build_admin_users_keyboard():
@@ -242,7 +370,7 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
         "mgmt_mode", "mgmt_cmd", "mgmt_owner_id", "mgmt_new_msgs",
         "admin_mode", "admin_target_id", "admin_cmd_name",
         "bc_target", "bc_user_labels", "pg_page", "pg_creator",
-        "pg_cmd",
+        "pg_cmd", "welcome_button_labels", "welcome_new_label",
     ):
         context.user_data.pop(k, None)
     markup = await build_main_menu(user.id)
@@ -625,33 +753,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Owner can manage and moderate all users' commands\n\n"
         "Use the menu below to get started!"
     )
-
-    inline_buttons = [
-        [
-            styled_button(
-                "➕ Add me to your chat!",
-                style="success",
-                url=f"https://t.me/{bot_username}?startgroup=true",
-            )
-        ],
-        [
-            styled_button(
-                "🎵 Music bot",
-                style="success",
-                url="https://t.me/music100200bot?start=tg",
-            ),
-            styled_button(
-                "🔗 Share bot",
-                style="success",
-                callback_data=f"sharebot_{user.id}",
-            ),
-        ],
-    ]
+    inline_markup = await build_welcome_inline_markup(user, bot_username)
 
     try:
         await update.message.reply_text(
             welcome_text,
-            reply_markup=InlineKeyboardMarkup(inline_buttons),
+            reply_markup=inline_markup,
             parse_mode="HTML"
         )
         await update.message.reply_text("Choose an option from the menu below:", reply_markup=markup)
@@ -701,10 +808,87 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Owner settings and admin panel ────────────────────────────────────────
     admin_mode = context.user_data.get("admin_mode")
+    if admin_mode == "welcome_buttons":
+        if text == BTN_BACK:
+            return await owner_settings(update, context)
+        if text == WELCOME_ADD_LABEL:
+            context.user_data["admin_mode"] = "welcome_add_label"
+            await message.reply_text(
+                "Send the text for the new inline button.",
+                reply_markup=reply_keyboard([
+                    [styled_reply_button(WELCOME_CANCEL, style="danger")],
+                ]),
+            )
+            return
+        button_id = context.user_data.get("welcome_button_labels", {}).get(text)
+        if button_id:
+            buttons = await get_welcome_buttons()
+            remaining = [button for button in buttons if button.get("id") != button_id]
+            await save_welcome_buttons(remaining)
+            return await welcome_buttons_panel(update, context, "✅ Welcome button deleted.")
+        return
+
+    if admin_mode == "welcome_add_label":
+        if text in (WELCOME_CANCEL, BTN_BACK):
+            return await welcome_buttons_panel(update, context, "Cancelled.")
+        if not text or len(text) > 64:
+            await message.reply_text("Button text must be between 1 and 64 characters.")
+            return
+        context.user_data["welcome_new_label"] = text
+        context.user_data["admin_mode"] = "welcome_add_url"
+        await message.reply_text(
+            "Send the button URL.\n\n"
+            "Use an http(s) URL. Optional placeholders: {bot_username}, {user_id}.",
+            reply_markup=reply_keyboard([
+                [styled_reply_button(WELCOME_CANCEL, style="danger")],
+            ]),
+        )
+        return
+
+    if admin_mode == "welcome_add_url":
+        if text in (WELCOME_CANCEL, BTN_BACK):
+            context.user_data.pop("welcome_new_label", None)
+            return await welcome_buttons_panel(update, context, "Cancelled.")
+        parsed = urlparse(text or "")
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            await message.reply_text(
+                "Invalid URL. Please send a complete http:// or https:// URL."
+            )
+            return
+
+        buttons = await get_welcome_buttons()
+        base_id = re.sub(
+            r"[^a-z0-9]+", "_",
+            context.user_data["welcome_new_label"].lower(),
+        ).strip("_")
+        base_id = f"custom_{base_id or 'button'}"
+        existing_ids = {button.get("id") for button in buttons}
+        button_id = base_id
+        suffix = 2
+        while button_id in existing_ids:
+            button_id = f"{base_id}_{suffix}"
+            suffix += 1
+        rows = [
+            button.get("row", 0) for button in buttons
+            if isinstance(button.get("row", 0), int)
+        ]
+        buttons.append({
+            "id": button_id,
+            "label": context.user_data.pop("welcome_new_label"),
+            "kind": "url",
+            "url": text,
+            "style": "primary",
+            "row": max(rows, default=-1) + 1,
+        })
+        await save_welcome_buttons(buttons)
+        return await welcome_buttons_panel(update, context, "✅ Welcome button added.")
+
     if admin_mode == "settings":
         if text == BTN_BACK:
             context.user_data.pop("admin_mode", None)
             return await send_main_menu(update, context)
+        if text == WELCOME_BUTTONS_LABEL:
+            return await welcome_buttons_panel(update, context)
         if text and text.startswith("User Command Creation:"):
             current = await db.get_setting("user_create_enabled", True)
             await db.set_setting("user_create_enabled", not current)
