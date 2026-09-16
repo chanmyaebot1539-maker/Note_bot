@@ -393,6 +393,7 @@ async def build_admin_commands_keyboard(target_id: int):
 
 def build_admin_detail_keyboard():
     return reply_keyboard([
+        [styled_reply_button("▶ View / Use Command", style="primary")],
         [styled_reply_button("Delete This Command", style="danger")],
         [styled_reply_button(BTN_BACK, style="danger")],
     ])
@@ -421,7 +422,7 @@ async def send_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, tex
 
 def _mgmt_detail_keyboard():
     return reply_keyboard([
-        [styled_reply_button("View Command", style="primary")],
+        [styled_reply_button("▶ View / Use Command", style="primary")],
         [styled_reply_button("Edit Messages", style="primary")],
         [styled_reply_button("Configure Menu", style="primary")],
         [styled_reply_button("Delete Command", style="primary")],
@@ -965,6 +966,21 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if admin_mode == "detail":
         target_id = context.user_data.get("admin_target_id")
         cmd_name = context.user_data.get("admin_cmd_name")
+        if text in ("▶ View / Use Command", "View Command"):
+            doc = await db.get_command(target_id, cmd_name)
+            if not doc and target_id == OWNER_ID:
+                doc = await db.get_global_command(OWNER_ID, cmd_name)
+            if not doc:
+                return await message.reply_text("Command not found.")
+            msgs = doc.get("messages", [])
+            if len(msgs) > PAGE_SIZE:
+                context.user_data.pop("pg_msgs", None)
+                context.user_data.pop("pg_ctrl", None)
+                context.user_data.pop("pg_chat", None)
+                await _deliver_page(context.bot, context, message.chat_id, doc, 0)
+            else:
+                await _send_command_messages(context.bot, message.chat_id, msgs)
+            return
         if text == BTN_BACK:
             context.user_data["admin_mode"] = "commands"
             return await message.reply_text(
@@ -998,7 +1014,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if mgmt_mode == "detail":
-        if text == "View Command":
+        if text in ("▶ View / Use Command", "View Command"):
             doc = await db.get_command(mgmt_owner_id, mgmt_cmd)
             if not doc and mgmt_owner_id == OWNER_ID:
                 doc = await db.get_global_command(OWNER_ID, mgmt_cmd)
