@@ -16,6 +16,28 @@ logger = logging.getLogger(__name__)
 
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
 
+
+def _parse_admin_ids(raw: str) -> set[int]:
+    """Parse comma/space-separated Telegram user IDs from ADMIN_IDS."""
+    admin_ids = set()
+    for token in re.split(r"[,\s]+", (raw or "").strip()):
+        if not token:
+            continue
+        try:
+            admin_ids.add(int(token))
+        except ValueError:
+            logger.warning("Ignoring invalid ADMIN_IDS value: %s", token)
+    return admin_ids
+
+
+ADMIN_IDS = _parse_admin_ids(os.environ.get("ADMIN_IDS", ""))
+
+
+def is_admin(user_id: int) -> bool:
+    """Return whether a user may create global commands and use Admin Panel."""
+    return user_id == OWNER_ID or user_id in ADMIN_IDS
+
+
 # Conversation states
 WAIT_CMD_NAME, WAIT_MESSAGES = range(2)
 BROADCAST_TARGET, BROADCAST_MSG = range(10, 12)
@@ -136,6 +158,21 @@ async def build_main_menu(user_id: int):
             styled_reply_button("/broadcast", style="primary"),
         ])
         rows.append([styled_reply_button("/stats", style="primary")])
+        if global_cmds:
+            rows.append([
+                styled_reply_button(
+                    HEADER_OWNER,
+                    style="primary",
+                )
+            ])
+    elif user_id in ADMIN_IDS:
+        rows.append([
+            styled_reply_button("Create Command", style="primary"),
+            styled_reply_button("Admin Panel", style="primary"),
+        ])
+        rows.append([
+            styled_reply_button("Config. Main Menu", style="primary"),
+        ])
         if global_cmds:
             rows.append([
                 styled_reply_button(
@@ -305,6 +342,7 @@ async def welcome_buttons_panel(update: Update, context: ContextTypes.DEFAULT_TY
         if len(button["label"]) > 44:
             short_label += "…"
         label = f"🗑 Delete: {short_label}"
+        # Keep the lookup label unique when two buttons have the same text.
         if label in delete_labels:
             label = f"{label} ({button['id']})"[:64]
         delete_labels[label] = button["id"]
@@ -326,9 +364,7 @@ async def welcome_buttons_panel(update: Update, context: ContextTypes.DEFAULT_TY
     )
     if notice:
         body = f"{notice}\n\n{body}"
-    await update.effective_message.reply_text(
-        body, reply_markup=reply_keyboard(rows), parse_mode="HTML"
-    )
+    await update.effective_message.reply_text(body, reply_markup=reply_keyboard(rows), parse_mode="HTML")
 
 
 async def build_admin_users_keyboard():
@@ -857,10 +893,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         buttons = await get_welcome_buttons()
-        base_id = re.sub(
-            r"[^a-z0-9]+", "_",
-            context.user_data["welcome_new_label"].lower(),
-        ).strip("_")
+        base_id = re.sub(r"[^a-z0-9]+", "_", context.user_data["welcome_new_label"].lower()).strip("_")
         base_id = f"custom_{base_id or 'button'}"
         existing_ids = {button.get("id") for button in buttons}
         button_id = base_id
@@ -1150,7 +1183,7 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "Create Command":
         return await create_command_start(update, context)
 
-    if text == "Admin Panel" and user.id == OWNER_ID:
+    if text == "Admin Panel" and is_admin(user.id):
         return await admin_panel(update, context)
 
     if text == "My Commands" and user.id == OWNER_ID:
@@ -1185,14 +1218,20 @@ async def route_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _run_command_for_chat(bot, context, chat_id: int, user_id: int, cmd_name: str):
-    """Resolve and send a command for both text and inline-button triggers."""
+    """Resolve and send a command for both text and button triggers.
+
+    Return whether a command document was found.  Reply-keyboard command
+    buttons send normal Telegram messages, so an explicit not-found result is
+    more useful than silently doing nothing when the user's command list and
+    stored command data get out of sync.
+    """
     doc = await db.get_global_command(OWNER_ID, cmd_name)
     if not doc:
         doc = await db.get_command(user_id, cmd_name)
 
     if not doc:
         logger.info(f"Command not found: '{cmd_name}' for user {user_id}")
-        return
+        return False
 
     msgs = doc.get("messages", [])
     if len(msgs) > PAGE_SIZE:
@@ -1202,6 +1241,7 @@ async def _run_command_for_chat(bot, context, chat_id: int, user_id: int, cmd_na
         await _deliver_page(bot, context, chat_id, doc, 0)
     else:
         await _send_command_messages(bot, chat_id, msgs)
+    return True
 
 
 async def trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE, cmd_name: str = None):
@@ -1215,13 +1255,18 @@ async def trigger_command(update: Update, context: ContextTypes.DEFAULT_TYPE, cm
     if not cmd_name:
         return
 
-    await _run_command_for_chat(
+    found = await _run_command_for_chat(
         context.bot,
         context,
         message.chat_id,
         user.id,
         cmd_name,
     )
+    if not found:
+        await message.reply_text(
+            f"Command /{cmd_name} was not found. "
+            "Please open Your Commands again and try once more."
+        )
 
 
 # ─── CREATE COMMAND FLOW ──────────────────────────────────────────────────────
@@ -1231,8 +1276,9 @@ async def create_command_start(update: Update, context: ContextTypes.DEFAULT_TYP
     if update.callback_query:
         await update.callback_query.answer()
 
-    # Check if user creation is allowed (only for non-owners)
-    if user.id != OWNER_ID:
+    # Owner/admin users can always create global commands. Regular users are
+    # governed by the owner's user-command setting.
+    if not is_admin(user.id):
         allowed = await db.get_setting("user_create_enabled", True)
         if not allowed:
             await update.effective_message.reply_text(
@@ -1295,8 +1341,14 @@ async def collect_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         user     = update.effective_user
         cmd_name = context.user_data["cmd_name"]
+        creator_id = OWNER_ID if is_admin(user.id) else user.id
         try:
-            await db.create_command(user.id, get_full_name(user), cmd_name, msgs)
+            await db.create_command(
+                creator_id,
+                get_full_name(user),
+                cmd_name,
+                msgs,
+            )
         except Exception as e:
             logger.error(f"create_command db error: {e}")
             await send_main_menu(update, context, "Error saving command. Try again.")
@@ -1340,8 +1392,14 @@ async def save_create_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     user = query.from_user
     cmd_name = context.user_data["cmd_name"]
+    creator_id = OWNER_ID if is_admin(user.id) else user.id
     try:
-        await db.create_command(user.id, get_full_name(user), cmd_name, msgs)
+        await db.create_command(
+            creator_id,
+            get_full_name(user),
+            cmd_name,
+            msgs,
+        )
     except Exception as e:
         logger.error(f"create_command db error: {e}")
         await send_main_menu(update, context, "Error saving command. Try again.")
@@ -2030,7 +2088,7 @@ async def cmd_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ─── ADMIN PANEL ─────────────────────────────────────────────────────────────
 
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
+    if not is_admin(update.effective_user.id):
         return
     users = await db.get_all_users_with_commands(OWNER_ID)
     if not users:
@@ -2056,7 +2114,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     user  = query.from_user
-    if user.id != OWNER_ID:
+    if not is_admin(user.id):
         return
     data = query.data
 
@@ -2089,6 +2147,11 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cmd_name  = parts[2]
         buttons   = [
             [styled_button(
+                "▶ View / Use Command",
+                style="primary",
+                callback_data=f"adminview_{target_id}_{cmd_name}",
+            )],
+            [styled_button(
                 "🗑 Delete This Command",
                 style="danger",
                 callback_data=f"admindelcmd_{target_id}_{cmd_name}",
@@ -2106,6 +2169,35 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.error(e)
+
+    elif data.startswith("adminview_"):
+        parts     = data.split("_", 2)
+        target_id = int(parts[1])
+        cmd_name  = parts[2]
+        doc       = await db.get_command(target_id, cmd_name)
+        if not doc:
+            await query.answer("Command not found.", show_alert=True)
+            return
+
+        # Send the saved content to the owner/admin who opened the panel,
+        # not to the user who originally created the command.
+        messages = doc.get("messages", [])
+        if len(messages) > PAGE_SIZE:
+            await _deliver_page(
+                context.bot,
+                context,
+                query.message.chat_id,
+                doc,
+                0,
+                ctrl_message_id=query.message.message_id,
+            )
+        else:
+            await _send_command_messages(
+                context.bot,
+                query.message.chat_id,
+                messages,
+            )
+        return
 
     elif data.startswith("admindelcmd_"):
         parts     = data.split("_", 2)
@@ -2284,7 +2376,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pg|") or data in ("pg_noop", "pg_close"):
         return await pagination_callback(update, context)
 
-    if any(data.startswith(p) for p in ("adminuser_", "admincmd_", "admindelcmd_")) or data == "admin_back":
+    if any(data.startswith(p) for p in (
+        "adminuser_", "admincmd_", "adminview_", "admindelcmd_"
+    )) or data == "admin_back":
         return await admin_callback(update, context)
 
     if any(data.startswith(p) for p in ("cfgadd_", "cfgpin_", "cfgremove_", "cfgview_")) or data == "cfgback":
@@ -2384,6 +2478,10 @@ def build_handlers():
         create_conv,
         broadcast_conv,
         CallbackQueryHandler(callback_router),
+        # Reply-keyboard command buttons are sent by Telegram as messages
+        # with a bot-command entity. Route those explicitly before relying on
+        # the generic text handler below.
+        MessageHandler(filters.COMMAND, route_message),
         MessageHandler(filters.TEXT, route_message),
         MessageHandler(
             filters.PHOTO | filters.VIDEO | filters.Document.ALL |
